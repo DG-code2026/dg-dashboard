@@ -1,0 +1,57 @@
+@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;500;600;700&family=Montserrat:wght@300;400;500;600;700&display=swap');
+
+:root, [data-theme="dark"] {
+  --dg-darkest: #0A0F1C;
+  --dg-navy: #1A2236;
+  --dg-blue: #364776;
+  --dg-steel: #6386AC;
+  --dg-cream: #FEF8E6;
+
+  --neon: #6386AC;
+  --neon-dim: #6386AC80;
+  --neon-glow: 0 0 8px #6386AC40, 0 0 20px #6386AC20;
+  --neon-glow-strong: 0 0 10px #6386AC60, 0 0 30px #6386AC30;
+  --bg: #0A0F1C;
+  --bg-card: #111729;
+  --bg-card-hover: #162034;
+  --border: #1E2A45;
+  --border-neon: #6386AC30;
+  --text: #D8DDE8;
+  --text-dim: #6B7A99;
+  --red: #E85D5D;
+  --red-dim: #E85D5D80;
+  --input-bg: #0D1220;
+  --th-bg: rgba(99,134,172,0.04);
+  --row-alt: rgba(99,134,172,0.02);
+  --row-hover: rgba(99,134,172,0.06);
+  --scanline-opacity: 0;
+  --debug-bg: #0D1220;
+}
+
+[data-theme="light"] {
+  --neon: #1A2236;
+  --neon-dim: #1A223680;
+  --neon-glow: none;
+  --neon-glow-strong: none;
+  --bg: #F7F5F0;
+  --bg-card: #FFFFFF;
+  --bg-card-hover: #FAFAF7;
+  --border: #D4D0C8;
+  --border-neon: #1A223620;
+  --text: #1A2236;
+  --text-dim: #7A7668;
+  --red: #C04040;
+  --red-dim: #C0404080;
+  --input-bg: #FFFFFF;
+  --th-bg: rgba(26,34,54,0.03);
+  --row-alt: rgba(26,34,54,0.015);
+  --row-hover: rgba(26,34,54,0.05);
+  --scanline-opacity: 0;
+  --debug-bg: #EEEDE8;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'Montserrat', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; -webkit-font-smoothing: antialiased; transition: background 0.3s, color 0.3s; }
+@keyframes pulse-neon { 0%,100%{opacity:1} 50%{opacity:0.7} }
+@keyframes fade-in { from{opacity:0;transform:translateY(12px)} to{opacity:1;transform:translateY(0)} }
+@keyframes spin { to{transform:rotate(360deg)} }
