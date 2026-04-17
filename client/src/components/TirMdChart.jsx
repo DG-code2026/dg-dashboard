@@ -30,6 +30,15 @@ export default function TirMdChart({data}){
 
   const chartData=useMemo(()=>data.filter(d=>d.tir!=null&&d.md!=null).map(d=>({...d,tirPct:+(d.tir*100).toFixed(2),mdVal:+d.md.toFixed(2)})),[data]);
 
+  const{mdDomain,mdTicks,tirDomain,tirTicks}=useMemo(()=>{
+    if(!chartData.length)return{mdDomain:[0,12],mdTicks:[1,2,3,4,5,6,7,8,9,10,11,12],tirDomain:[0,12],tirTicks:[1,2,3,4,5,6,7,8,9,10,11,12]};
+    const mds=chartData.map(d=>d.mdVal);const tirs=chartData.map(d=>d.tirPct);
+    const mdLo=Math.max(0,Math.floor(Math.min(...mds))-1);const mdHi=Math.ceil(Math.max(...mds))+1;
+    const tirLo=Math.max(0,Math.floor(Math.min(...tirs))-1);const tirHi=Math.ceil(Math.max(...tirs))+1;
+    const mkTicks=(lo,hi)=>{const n=hi-lo;const step=n<=14?1:n<=28?2:Math.ceil(n/14);const t=[];for(let v=Math.ceil(lo/step)*step;v<=hi;v+=step)t.push(v);return t;};
+    return{mdDomain:[mdLo,mdHi],mdTicks:mkTicks(mdLo,mdHi),tirDomain:[tirLo,tirHi],tirTicks:mkTicks(tirLo,tirHi)};
+  },[chartData]);
+
   const trendReg=useMemo(()=>{
     if(!showTrend||chartData.length<2)return null;
     return logReg(chartData.map(d=>({x:d.mdVal,y:d.tirPct})));
@@ -54,7 +63,7 @@ export default function TirMdChart({data}){
       if(px!=null&&py!=null&&!isNaN(px)&&!isNaN(py))points.push(`${px},${py}`);
     }
     if(points.length<2)return null;
-    return<polyline points={points.join(' ')} fill="none" stroke="var(--neon)" strokeWidth={2} strokeDasharray="8 4" strokeOpacity={0.4}/>;
+    return<polyline points={points.join(' ')} fill="none" stroke="var(--neon)" strokeWidth={2.5} strokeDasharray="8 5" strokeOpacity={0.95} style={{filter:'drop-shadow(0 0 3px var(--neon))'}}/>;
   };
 
   if(!chartData.length)return(<div style={S.container}><div style={S.header}><h3 style={S.title}>CURVA DE RENDIMIENTOS</h3></div><div style={{padding:40,textAlign:'center',color:'var(--text-dim)',fontSize:12}}>No hay datos suficientes</div></div>);
@@ -74,10 +83,10 @@ export default function TirMdChart({data}){
         <ResponsiveContainer width="100%" height={460}>
           <ScatterChart margin={{top:35,right:30,bottom:25,left:20}}>
             {showGrid&&<CartesianGrid strokeDasharray="3 3" stroke="var(--border)"/>}
-            <XAxis type="number" dataKey="mdVal" name="MD" domain={['auto','auto']} tickCount={8} tickFormatter={v=>Number(v).toFixed(1)} tick={{fill:'var(--text-dim)',fontSize:10}} tickLine={{stroke:'var(--border)'}} axisLine={{stroke:'var(--border)'}}>
+            <XAxis type="number" dataKey="mdVal" name="MD" domain={mdDomain} ticks={mdTicks} allowDecimals={false} tickFormatter={v=>String(Math.round(v))} tick={{fill:'var(--text-dim)',fontSize:10}} tickLine={{stroke:'var(--border)'}} axisLine={{stroke:'var(--border)'}}>
               <Label value="Modified Duration (años)" offset={-10} position="insideBottom" style={{fill:'var(--text-dim)',fontSize:10,letterSpacing:1}}/>
             </XAxis>
-            <YAxis type="number" dataKey="tirPct" name="TIR" domain={['auto','auto']} tickCount={6} tickFormatter={v=>`${Number(v).toFixed(1)}%`} tick={{fill:'var(--text-dim)',fontSize:10}} tickLine={{stroke:'var(--border)'}} axisLine={{stroke:'var(--border)'}}>
+            <YAxis type="number" dataKey="tirPct" name="TIR" domain={tirDomain} ticks={tirTicks} allowDecimals={false} tickFormatter={v=>`${Math.round(v)}%`} tick={{fill:'var(--text-dim)',fontSize:10}} tickLine={{stroke:'var(--border)'}} axisLine={{stroke:'var(--border)'}}>
               <Label value="TIR (%)" angle={-90} position="insideLeft" style={{fill:'var(--text-dim)',fontSize:10,letterSpacing:1}}/>
             </YAxis>
             <Tooltip content={<CustomTooltip/>} cursor={false}/>

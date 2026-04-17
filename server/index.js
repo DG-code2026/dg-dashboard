@@ -167,6 +167,53 @@ app.patch('/api/db/cartera-items/:itemId', async (req, res) => {
 });
 
 // ══════════════════════════════════════════════
+//  TRADES (trade tracking)
+// ══════════════════════════════════════════════
+app.get('/api/db/trades', async (req, res) => {
+  try { const data = await supa('/trades?order=created_at.desc'); res.json(Array.isArray(data) ? data : []); }
+  catch (e) { res.json([]); }
+});
+
+app.post('/api/db/trades', async (req, res) => {
+  try {
+    const body = req.body || {};
+    if (!body.ticker) return res.status(400).json({ error: 'ticker required' });
+    const row = {
+      tag: body.tag || '',
+      client_name: body.client_name || '',
+      client_account: body.client_account || '',
+      broker: body.broker || 'PPI',
+      trade_date: body.trade_date || new Date().toISOString().slice(0, 10),
+      ticker: String(body.ticker).toUpperCase(),
+      instrument_type: body.instrument_type || 'BONOS_PUBLICOS',
+      settlement: body.settlement || 'A-24HS',
+      currency: body.currency || 'ARS',
+      price: body.price != null ? Number(body.price) : null,
+      quantity: body.quantity != null ? Number(body.quantity) : 100,
+      target_type: body.target_type || 'price',
+      target_value: body.target_value != null ? Number(body.target_value) : null,
+      stop_loss: body.stop_loss != null ? Number(body.stop_loss) : null,
+      commission: body.commission != null ? Number(body.commission) : 0,
+      notes: body.notes || '',
+    };
+    const r = await supa('/trades', { method: 'POST', body: row });
+    res.json(Array.isArray(r) ? r[0] : r);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.patch('/api/db/trades/:id', async (req, res) => {
+  try {
+    const r = await supa(`/trades?id=eq.${req.params.id}`, { method: 'PATCH', body: { ...req.body, updated_at: new Date().toISOString() } });
+    res.json(Array.isArray(r) ? r[0] : r);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/db/trades/:id', async (req, res) => {
+  try { await supa(`/trades?id=eq.${req.params.id}`, { method: 'DELETE' }); res.json({ ok: true }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ══════════════════════════════════════════════
 //  PPI API
 // ══════════════════════════════════════════════
 const PPI_BASE = 'https://clientapi.portfoliopersonal.com';
@@ -283,20 +330,102 @@ app.get('/api/ppi/status', async (req, res) => { res.json({ authenticated: !!ppi
 // ══════════════════════════════════════════════
 const TK = ['AL30', 'AL30D', 'AL30C'];
 let authToken = null, primaryWs = null, latestData = {}, resolved = [], symMap = {};
+let allInstruments = [];
+
+// Settlement aliases: app-facing → Primary symbol suffix
+const SETTLEMENT_MAP = { 'A-24HS': '24hs', 'A-48HS': '48hs', 'INMEDIATA': 'CI', 'CI': 'CI', '24HS': '24hs', '48HS': '48hs' };
 
 function fetchJSON(path) { return new Promise((res, rej) => { const url = new URL(path, PRIMARY_REST_URL); const req = https.request({ method: 'GET', hostname: url.hostname, port: url.port || 443, path: url.pathname + url.search, headers: { 'X-Auth-Token': authToken } }, r => { let b = ''; r.on('data', c => b += c); r.on('end', () => { try { res(JSON.parse(b)); } catch { rej(new Error('JSON')); } }); }); req.on('error', rej); req.end(); }); }
 
 async function authPrimary() { return new Promise((res, rej) => { const url = new URL('/auth/getToken', PRIMARY_REST_URL); const req = https.request({ method: 'POST', hostname: url.hostname, port: url.port || 443, path: url.pathname, headers: { 'X-Username': PRIMARY_USER, 'X-Password': PRIMARY_PASS } }, r => { const t = r.headers['x-auth-token']; if (t) { authToken = t; console.log('✅ Primary'); res(t); } else rej(new Error('Auth fail')); }); req.on('error', rej); req.end(); }); }
 
-async function discover() { try { const d = await fetchJSON('/rest/instruments/all'); if (d.status !== 'OK') return; const all = d.instruments.filter(i => TK.some(k => (i.instrumentId?.symbol || '').includes(k))); resolved = []; symMap = {}; for (const k of TK) { const m = all.find(i => i.instrumentId.symbol.includes(`- ${k} -`) && i.instrumentId.symbol.includes('CI')) || all.find(i => i.instrumentId.symbol.includes(`- ${k} -`)); if (m) { resolved.push(m.instrumentId); symMap[m.instrumentId.symbol] = k; } } } catch {} }
+async function discover() {
+  try {
+    const d = await fetchJSON('/rest/instruments/all');
+    if (d.status !== 'OK') return;
+    allInstruments = Array.isArray(d.instruments) ? d.instruments : [];
+    const al30 = allInstruments.filter(i => TK.some(k => (i.instrumentId?.symbol || '').includes(k)));
+    resolved = []; symMap = {};
+    for (const k of TK) {
+      const m = al30.find(i => i.instrumentId.symbol.includes(`- ${k} -`) && i.instrumentId.symbol.includes('CI')) || al30.find(i => i.instrumentId.symbol.includes(`- ${k} -`));
+      if (m) { resolved.push(m.instrumentId); symMap[m.instrumentId.symbol] = k; }
+    }
+    console.log(`📋 Instruments: ${allInstruments.length} total, ${resolved.length} AL30-series resolved`);
+  } catch (e) { console.error('discover error:', e.message); }
+}
+
+function findInstrument(ticker, settlement) {
+  if (!ticker) return null;
+  const t = String(ticker).toUpperCase();
+  const s = SETTLEMENT_MAP[settlement] || settlement || '24hs';
+  // Match "- TICKER -" and trailing "- SETTLEMENT"
+  const exact = allInstruments.find(i => {
+    const sym = i.instrumentId?.symbol || '';
+    return sym.includes(`- ${t} -`) && (sym.endsWith(`- ${s}`) || sym.endsWith(` ${s}`));
+  });
+  if (exact) return exact;
+  // Fallback: looser match
+  return allInstruments.find(i => {
+    const sym = i.instrumentId?.symbol || '';
+    return sym.includes(` ${t} `) && sym.toLowerCase().includes(s.toLowerCase());
+  }) || null;
+}
+
+function subscribeDynamic(ticker, settlement) {
+  const inst = findInstrument(ticker, settlement);
+  if (!inst) return { ok: false, error: 'Ticker no encontrado en Primary' };
+  const key = `${String(ticker).toUpperCase()}|${settlement}`;
+  if (symMap[inst.instrumentId.symbol]) return { ok: true, symbol: key, already: true };
+  symMap[inst.instrumentId.symbol] = key;
+  resolved.push(inst.instrumentId);
+  if (primaryWs?.readyState === WebSocket.OPEN) {
+    try {
+      primaryWs.send(JSON.stringify({
+        type: 'smd', level: 1,
+        entries: ['BI','OF','LA','CL','HI','LO','TV','OI','EV','NV'],
+        products: [{ symbol: inst.instrumentId.symbol, marketId: inst.instrumentId.marketId }],
+        depth: 1,
+      }));
+    } catch (e) { console.error('smd send:', e.message); }
+  }
+  console.log(`📡 Subscribed: ${key} (${inst.instrumentId.symbol})`);
+  return { ok: true, symbol: key, primarySymbol: inst.instrumentId.symbol };
+}
 
 function connectPrimary() { if (!authToken) return; primaryWs = new WebSocket(`${PRIMARY_WS_URL}/`, [], { headers: { 'X-Auth-Token': authToken } }); primaryWs.on('open', () => { console.log('✅ WS'); if (resolved.length) primaryWs.send(JSON.stringify({ type: 'smd', level: 1, entries: ['BI','OF','LA','CL','HI','LO','TV','OI','EV','NV'], products: resolved.map(i => ({ symbol: i.symbol, marketId: i.marketId })), depth: 1 })); }); primaryWs.on('message', raw => { try { const m = JSON.parse(raw.toString()); if (m.type === 'Md') { const s = symMap[m.instrumentId?.symbol] || m.instrumentId?.symbol; latestData[s] = { symbol: s, marketData: m.marketData, timestamp: Date.now() }; const p = JSON.stringify({ type: 'md_update', symbol: s, marketData: m.marketData, timestamp: Date.now() }); wss.clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(p); }); } } catch {} }); primaryWs.on('close', () => setTimeout(reconnect, 5000)); primaryWs.on('error', () => {}); }
 
-async function reconnect() { try { await authPrimary(); await discover(); connectPrimary(); } catch { setTimeout(reconnect, 10000); } }
+async function reconnect() { try { await authPrimary(); await discover(); connectPrimary(); setTimeout(resubscribeAllTrades, 3000); } catch { setTimeout(reconnect, 10000); } }
+
+async function resubscribeAllTrades() {
+  try {
+    const trades = await supa('/trades?select=ticker,settlement');
+    if (!Array.isArray(trades)) return;
+    const uniq = new Map();
+    trades.forEach(t => { const k = `${t.ticker}|${t.settlement || 'A-24HS'}`; uniq.set(k, { ticker: t.ticker, settlement: t.settlement || 'A-24HS' }); });
+    for (const { ticker, settlement } of uniq.values()) subscribeDynamic(ticker, settlement);
+    console.log(`🔁 Resubscribed ${uniq.size} trade tickers`);
+  } catch (e) { console.error('Resubscribe trades:', e.message); }
+}
 
 wss.on('connection', ws => { const snap = Object.values(latestData); if (snap.length) ws.send(JSON.stringify({ type: 'snapshot', data: snap })); ws.send(JSON.stringify({ type: 'status', connected: primaryWs?.readyState === WebSocket.OPEN, tickers: TK })); });
 
 app.get('/api/health', (req, res) => res.json({ status: 'ok', primary: primaryWs?.readyState === WebSocket.OPEN, supabase: !!SUPA_URL }));
+
+// Primary instrument validation + subscription
+app.get('/api/primary/validate', (req, res) => {
+  const { ticker, settlement = 'A-24HS' } = req.query;
+  if (!ticker) return res.status(400).json({ valid: false, error: 'ticker required' });
+  if (!allInstruments.length) return res.json({ valid: false, error: 'Instruments not loaded yet' });
+  const inst = findInstrument(String(ticker).toUpperCase(), settlement);
+  if (!inst) return res.json({ valid: false });
+  res.json({ valid: true, symbol: inst.instrumentId.symbol, marketId: inst.instrumentId.marketId });
+});
+
+app.post('/api/primary/subscribe', (req, res) => {
+  const { ticker, settlement = 'A-24HS' } = req.body || {};
+  if (!ticker) return res.status(400).json({ error: 'ticker required' });
+  res.json(subscribeDynamic(String(ticker).toUpperCase(), settlement));
+});
 
 // ══════════════════════════════════════════════
 //  FX DAILY CLOSES — auto-save to Supabase
@@ -351,20 +480,10 @@ async function saveDailyFxClose() {
   }
 }
 
-// Auto-save every 5 min (Mon-Fri, 10:00-17:30 AR time)
-setInterval(() => {
-  const now = new Date();
-  const arHour = (now.getUTCHours() - 3 + 24) % 24; // UTC-3
-  const day = now.getUTCDay();
-  if (day >= 1 && day <= 5 && arHour >= 10 && arHour < 18) {
-    saveDailyFxClose();
-  }
-}, 5 * 60 * 1000);
-
-// Manual save trigger
+// FX auto-save disabled per user request.
+// Manual save trigger (kept for backwards compatibility but disabled)
 app.post('/api/fx/save', async (req, res) => {
-  await saveDailyFxClose();
-  res.json({ ok: true });
+  res.json({ ok: false, disabled: true });
 });
 
 // GET historical FX data
@@ -381,4 +500,4 @@ app.get('/api/fx/history', async (req, res) => {
   }
 });
 
-server.listen(PORT, async () => { console.log(`🚀 :${PORT}`); try { await authPrimary(); await discover(); connectPrimary(); } catch (e) { console.error('Init:', e.message); setTimeout(reconnect, 10000); } });
+server.listen(PORT, async () => { console.log(`🚀 :${PORT}`); try { await authPrimary(); await discover(); connectPrimary(); setTimeout(resubscribeAllTrades, 3000); } catch (e) { console.error('Init:', e.message); setTimeout(reconnect, 10000); } });
