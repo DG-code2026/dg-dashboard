@@ -1,5 +1,6 @@
 # Dependencies
-node_modules
+node_modules/
+client/node_modules/
 
 # Environment
 .env
@@ -7,13 +8,12 @@ node_modules
 # Build output
 dist/
 
+# Logs
+*.log
+
 # OS files
 .DS_Store
 Thumbs.db
-
-# Logs
-*.log
-npm-debug.log*
 
 # IDE
 .vscode/
