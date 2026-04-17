@@ -26,7 +26,7 @@ function logReg(pts){
 }
 
 export default function TirMdChart({data}){
-  const chartRef=useRef(null);const[showGrid,setShowGrid]=useState(true);const[showTrend,setShowTrend]=useState(true);const[dl,setDl]=useState(false);
+  const chartRef=useRef(null);const[showGrid,setShowGrid]=useState(true);const[dl,setDl]=useState(false);
 
   const chartData=useMemo(()=>data.filter(d=>d.tir!=null&&d.md!=null).map(d=>({...d,tirPct:+(d.tir*100).toFixed(2),mdVal:+d.md.toFixed(2)})),[data]);
 
@@ -39,32 +39,24 @@ export default function TirMdChart({data}){
     return{mdDomain:[mdLo,mdHi],mdTicks:mkTicks(mdLo,mdHi),tirDomain:[tirLo,tirHi],tirTicks:mkTicks(tirLo,tirHi)};
   },[chartData]);
 
-  const trendReg=useMemo(()=>{
-    if(!showTrend||chartData.length<2)return null;
-    return logReg(chartData.map(d=>({x:d.mdVal,y:d.tirPct})));
-  },[chartData,showTrend]);
+  // Sampled points along the logarithmic regression, rendered via a Scatter with line=true so Recharts applies the axis scales.
+  const trendData=useMemo(()=>{
+    if(chartData.length<2)return[];
+    const reg=logReg(chartData.map(d=>({x:d.mdVal,y:d.tirPct})));
+    if(!reg)return[];
+    const xs=chartData.map(d=>d.mdVal);
+    const minX=Math.max(0.1,Math.min(...xs)-0.3);const maxX=Math.max(...xs)+0.3;
+    const steps=60;const out=[];
+    for(let i=0;i<=steps;i++){
+      const x=minX+(maxX-minX)*(i/steps);
+      out.push({mdVal:+x.toFixed(3),tirPct:+reg.fn(x).toFixed(3)});
+    }
+    return out;
+  },[chartData]);
 
   const cap=async a=>{setDl(true);try{if(!window.html2canvas)await new Promise((r,j)=>{const s=document.createElement('script');s.src='https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js';s.onload=()=>r();s.onerror=()=>j();document.head.appendChild(s);});const canvas=await window.html2canvas(chartRef.current,{backgroundColor:getComputedStyle(document.documentElement).getPropertyValue('--bg').trim()||'#0a0a0a',scale:2,useCORS:true,logging:false});if(a==='download'){const l=document.createElement('a');l.download=`curva-rendimientos-${new Date().toISOString().slice(0,10)}.png`;l.href=canvas.toDataURL('image/png');l.click();}else canvas.toBlob(b=>{if(b)navigator.clipboard.write([new ClipboardItem({'image/png':b})]);});}catch(e){alert(e.message);}finally{setDl(false);}};
 
-  // Custom dot that renders just the point (no surrounding circle)
   const renderDot=(props)=>{const{cx,cy}=props;return<circle cx={cx} cy={cy} r={5} fill="var(--neon)" fillOpacity={0.85} stroke="var(--neon)" strokeWidth={1}/>;};
-
-  // Logarithmic trend curve rendered as SVG polyline
-  const TrendLine=({xAxisMap,yAxisMap})=>{
-    if(!trendReg||!xAxisMap||!yAxisMap)return null;
-    const xAxis=Object.values(xAxisMap)[0];const yAxis=Object.values(yAxisMap)[0];
-    if(!xAxis||!yAxis)return null;
-    const xs=chartData.map(d=>d.mdVal);const minX=Math.max(0.1,Math.min(...xs)-0.3);const maxX=Math.max(...xs)+0.3;
-    const steps=50;const points=[];
-    for(let i=0;i<=steps;i++){
-      const x=minX+(maxX-minX)*(i/steps);
-      const y=trendReg.fn(x);
-      const px=xAxis.scale(x);const py=yAxis.scale(y);
-      if(px!=null&&py!=null&&!isNaN(px)&&!isNaN(py))points.push(`${px},${py}`);
-    }
-    if(points.length<2)return null;
-    return<polyline points={points.join(' ')} fill="none" stroke="var(--neon)" strokeWidth={2.5} strokeDasharray="8 5" strokeOpacity={0.95} style={{filter:'drop-shadow(0 0 3px var(--neon))'}}/>;
-  };
 
   if(!chartData.length)return(<div style={S.container}><div style={S.header}><h3 style={S.title}>CURVA DE RENDIMIENTOS</h3></div><div style={{padding:40,textAlign:'center',color:'var(--text-dim)',fontSize:12}}>No hay datos suficientes</div></div>);
 
@@ -74,7 +66,6 @@ export default function TirMdChart({data}){
         <h3 style={S.title}>CURVA DE RENDIMIENTOS</h3>
         <div style={{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
           <label style={S.ctrl}><input type="checkbox" checked={showGrid} onChange={()=>setShowGrid(!showGrid)} style={{marginRight:4}}/><span style={S.ctrlLabel}>Grilla</span></label>
-          <label style={S.ctrl}><input type="checkbox" checked={showTrend} onChange={()=>setShowTrend(!showTrend)} style={{marginRight:4}}/><span style={S.ctrlLabel}>Tendencia log.</span></label>
           <button style={S.btn} onClick={()=>cap('download')} disabled={dl} title="Descargar">⬇</button>
           <button style={S.btn} onClick={()=>cap('copy')} disabled={dl} title="Copiar">📋</button>
         </div>
@@ -90,14 +81,16 @@ export default function TirMdChart({data}){
               <Label value="TIR (%)" angle={-90} position="insideLeft" style={{fill:'var(--text-dim)',fontSize:10,letterSpacing:1}}/>
             </YAxis>
             <Tooltip content={<CustomTooltip/>} cursor={false}/>
-            {showTrend&&<TrendLine/>}
+            {trendData.length>1&&(
+              <Scatter data={trendData} line={{stroke:'#ff7ac6',strokeWidth:2.5,strokeDasharray:'6 4'}} shape={()=>null} isAnimationActive={false} legendType="none"/>
+            )}
             <Scatter data={chartData} shape={renderDot} isAnimationActive={false}>
               <LabelList dataKey="ticker" content={<TickerLabel/>}/>
             </Scatter>
           </ScatterChart>
         </ResponsiveContainer>
         <div style={S.chartFooter}>
-          <span>{chartData.length} papeles · {new Date().toLocaleDateString('es-AR',{day:'2-digit',month:'long',year:'numeric'})}</span>
+          <span>{chartData.length} papeles · tendencia log. · {new Date().toLocaleDateString('es-AR',{day:'2-digit',month:'long',year:'numeric'})}</span>
           <span>Fuente: PPI · API REST · A-24HS</span>
         </div>
       </div>
