@@ -51,11 +51,11 @@ export default function TickerCard({ ticker, label, data, delay }) {
           <div
             style={{
               ...styles.liveDot,
-              backgroundColor: hasData ? 'var(--neon)' : 'var(--text-dim)',
-              boxShadow: hasData ? 'var(--neon-glow)' : 'none',
+              backgroundColor: hasData ? 'var(--green)' : 'var(--text-dim)',
+              boxShadow: hasData ? 'var(--green-glow)' : 'none',
             }}
           />
-          <span style={{ ...styles.liveText, color: hasData ? 'var(--neon)' : 'var(--text-dim)' }}>
+          <span style={{ ...styles.liveText, color: hasData ? 'var(--green)' : 'var(--text-dim)' }}>
             {hasData ? 'LIVE' : 'SIN DATOS'}
           </span>
         </div>
@@ -67,13 +67,13 @@ export default function TickerCard({ ticker, label, data, delay }) {
         <div
           style={{
             ...styles.priceBox,
-            borderColor: flash === 'bid' ? 'var(--neon)' : 'var(--border)',
-            boxShadow: flash === 'bid' ? 'var(--neon-glow)' : 'none',
+            borderColor: flash === 'bid' ? 'var(--green)' : 'var(--border)',
+            boxShadow: flash === 'bid' ? 'var(--green-glow)' : 'none',
             transition: 'all 0.3s ease',
           }}
         >
-          <span style={styles.priceLabel}>BID</span>
-          <span style={styles.priceValue}>
+          <span style={{ ...styles.priceLabel, color: 'var(--green)' }}>BID</span>
+          <span style={{ ...styles.priceValue, color: 'var(--green)' }}>
             {bid !== null ? formatPrice(bid) : '—'}
           </span>
           {bidSize !== null && (

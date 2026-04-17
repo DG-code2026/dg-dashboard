@@ -15,12 +15,12 @@ function Indicator({ label, on }) {
           width: 8,
           height: 8,
           borderRadius: '50%',
-          backgroundColor: on ? 'var(--neon)' : 'var(--red)',
-          boxShadow: on ? 'var(--neon-glow)' : '0 0 6px var(--red-dim)',
+          backgroundColor: on ? 'var(--green)' : 'var(--red)',
+          boxShadow: on ? 'var(--green-glow)' : '0 0 6px var(--red-dim)',
           transition: 'all 0.3s',
         }}
       />
-      <span style={{ ...styles.label, color: on ? 'var(--neon)' : 'var(--red)' }}>
+      <span style={{ ...styles.label, color: on ? 'var(--green)' : 'var(--red)' }}>
         {label}
       </span>
     </div>

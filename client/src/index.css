@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;500;600;700&family=Montserrat:wght@300;400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;500;600;700&family=Montserrat:wght@300;400;500;600;700&family=Roboto+Mono:wght@400;500;600;700&display=swap');
 
 :root, [data-theme="dark"] {
   --dg-darkest: #0A0F1C;
@@ -11,6 +11,9 @@
   --neon-dim: #6386AC80;
   --neon-glow: 0 0 8px #6386AC40, 0 0 20px #6386AC20;
   --neon-glow-strong: 0 0 10px #6386AC60, 0 0 30px #6386AC30;
+  --green: #39FF14;
+  --green-dim: #39FF1480;
+  --green-glow: 0 0 8px #39FF1440, 0 0 20px #39FF1420;
   --bg: #0A0F1C;
   --bg-card: #111729;
   --bg-card-hover: #162034;
@@ -33,6 +36,9 @@
   --neon-dim: #1A223680;
   --neon-glow: none;
   --neon-glow-strong: none;
+  --green: #16A34A;
+  --green-dim: #16A34A80;
+  --green-glow: none;
   --bg: #F7F5F0;
   --bg-card: #FFFFFF;
   --bg-card-hover: #FAFAF7;
