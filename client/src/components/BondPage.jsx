@@ -4,7 +4,7 @@ import BondDetailModal from './BondDetailModal';
 import TirMdChart from './TirMdChart';
 import AddToCarteraPopup from './AddToCarteraPopup';
 
-const API = 'http://localhost:3001';
+const API = import.meta.env.VITE_API_URL || 'http://localhost:3001';
 const HISTORY_KEY_PREFIX = 'rf-history-';
 const REFRESH_MS = 60000;
 const MONTH_LABELS = ['EN','FEB','MAR','ABR','MAY','JUN','JUL','AGO','SEP','OCT','NOV','DIC'];

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 
-const API = 'http://localhost:3001';
+const API = import.meta.env.VITE_API_URL || 'http://localhost:3001';
 
 export default function AddToCarteraPopup({ ticker, precio, tipo, settlement, laminaMinima, onClose }) {
   const [carteras, setCarteras] = useState([]);
