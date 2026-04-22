@@ -20,7 +20,12 @@
       "mcp__8b3b992f-c57e-4ed6-b0c3-c4f47ba87249__execute_sql",
       "Bash(node -e \"const fs=require\\('fs'\\);const c=fs.readFileSync\\('src/components/PropuestasPage.jsx','utf8'\\);const braces={'{':0,'\\(':0,'[':0};for\\(const ch of c\\){if\\(ch==='{'\\)braces['{']++;if\\(ch==='}'\\)braces['{']--;if\\(ch==='\\('\\)braces['\\(']++;if\\(ch==='\\)'\\)braces['\\(']--;if\\(ch==='['\\)braces['[']++;if\\(ch===']'\\)braces['[']--;}console.log\\(JSON.stringify\\(braces\\)\\);\")",
       "Bash(npx --no-install esbuild --loader=jsx --bundle=false --format=esm src/components/PropuestasPage.jsx)",
-      "Bash(npx --no-install esbuild --loader:.jsx=jsx --bundle=false --format=esm src/components/PropuestasPage.jsx)"
+      "Bash(npx --no-install esbuild --loader:.jsx=jsx --bundle=false --format=esm src/components/PropuestasPage.jsx)",
+      "Bash(npx --no-install esbuild --loader:.jsx=jsx --bundle=false --format=esm src/components/FondosPershing.jsx src/App.jsx)",
+      "Bash(npx --no-install esbuild --loader:.jsx=jsx --bundle=false --format=esm src/components/FondosPershing.jsx)",
+      "Bash(npx --no-install esbuild --loader:.jsx=jsx --bundle=false --format=esm src/App.jsx)",
+      "Bash(node --check index.js)",
+      "Bash(curl -s -o /dev/null -w \"GET %{http_code}\\\\n\" http://localhost:3001/api/db/fondos-pershing --max-time 3)"
     ]
   }
 }

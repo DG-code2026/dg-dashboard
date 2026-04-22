@@ -252,6 +252,52 @@ app.delete('/api/db/propuestas/:id', async (req, res) => {
 });
 
 // ══════════════════════════════════════════════
+//  FONDOS PERSHING — listado compartido (todos los usuarios ven lo mismo)
+//  PK = isin. Validación mínima en el servidor; el cliente ya valida formato.
+// ══════════════════════════════════════════════
+app.get('/api/db/fondos-pershing', async (req, res) => {
+  try {
+    const data = await supa('/fondos_pershing?order=casa.asc,nombre.asc');
+    res.json(Array.isArray(data) ? data : []);
+  } catch (e) { res.json([]); }
+});
+
+app.post('/api/db/fondos-pershing', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const isin = String(body.isin || '').trim().toUpperCase();
+    const casa = String(body.casa || '').trim();
+    const nombre = String(body.nombre || '').trim();
+    if (!isin || !casa || !nombre) return res.status(400).json({ error: 'isin, casa y nombre son obligatorios' });
+    if (!/^[A-Z]{2}[A-Z0-9]{9}[0-9]$/.test(isin)) return res.status(400).json({ error: 'formato de ISIN inválido' });
+    // Upsert idempotente: si el ISIN ya existe, falla con 409 para que el cliente muestre un mensaje claro.
+    const existing = await supa(`/fondos_pershing?isin=eq.${encodeURIComponent(isin)}`);
+    if (Array.isArray(existing) && existing.length > 0) return res.status(409).json({ error: `ya existe un fondo con ISIN ${isin}` });
+    const r = await supa('/fondos_pershing', { method: 'POST', body: { isin, casa, nombre } });
+    res.json(Array.isArray(r) ? r[0] : r);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.patch('/api/db/fondos-pershing/:isin', async (req, res) => {
+  try {
+    const isin = String(req.params.isin || '').toUpperCase();
+    const patch = { updated_at: new Date().toISOString() };
+    if (req.body?.casa != null) patch.casa = String(req.body.casa).trim();
+    if (req.body?.nombre != null) patch.nombre = String(req.body.nombre).trim();
+    const r = await supa(`/fondos_pershing?isin=eq.${encodeURIComponent(isin)}`, { method: 'PATCH', body: patch });
+    res.json(Array.isArray(r) ? r[0] : r);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/db/fondos-pershing/:isin', async (req, res) => {
+  try {
+    const isin = String(req.params.isin || '').toUpperCase();
+    await supa(`/fondos_pershing?isin=eq.${encodeURIComponent(isin)}`, { method: 'DELETE' });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ══════════════════════════════════════════════
 //  PPI API
 // ══════════════════════════════════════════════
 const PPI_BASE = 'https://clientapi.portfoliopersonal.com';
