@@ -212,6 +212,46 @@ app.delete('/api/db/trades/:id', async (req, res) => {
 });
 
 // ══════════════════════════════════════════════
+//  PROPUESTAS DE INVERSIÓN
+// ══════════════════════════════════════════════
+app.get('/api/db/propuestas', async (req, res) => {
+  try { const data = await supa('/propuestas?order=created_at.desc'); res.json(Array.isArray(data) ? data : []); }
+  catch (e) { res.json([]); }
+});
+
+app.post('/api/db/propuestas', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const row = {
+      client_name: body.client_name || '',
+      client_account: body.client_account || '',
+      broker: body.broker || '',
+      asesor: body.asesor || '',
+      plazo: body.plazo || 'MEDIANO',
+      perfil: body.perfil || 'MODERADO',
+      amount_total: body.amount_total != null ? Number(body.amount_total) : null,
+      currency: body.currency || 'ARS',
+      items: Array.isArray(body.items) ? body.items : [],
+      notes: body.notes || '',
+    };
+    const r = await supa('/propuestas', { method: 'POST', body: row });
+    res.json(Array.isArray(r) ? r[0] : r);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.patch('/api/db/propuestas/:id', async (req, res) => {
+  try {
+    const r = await supa(`/propuestas?id=eq.${req.params.id}`, { method: 'PATCH', body: { ...req.body, updated_at: new Date().toISOString() } });
+    res.json(Array.isArray(r) ? r[0] : r);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/db/propuestas/:id', async (req, res) => {
+  try { await supa(`/propuestas?id=eq.${req.params.id}`, { method: 'DELETE' }); res.json({ ok: true }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ══════════════════════════════════════════════
 //  PPI API
 // ══════════════════════════════════════════════
 const PPI_BASE = 'https://clientapi.portfoliopersonal.com';
@@ -252,10 +292,12 @@ const PPI_CONCURRENCY = 5;
 
 function getCached(key) {
   const c = ppiCache.get(key);
-  if (c && Date.now() - c.ts < PPI_CACHE_TTL) return c.data;
+  if (!c) return null;
+  const ttl = c.ttl || PPI_CACHE_TTL;
+  if (Date.now() - c.ts < ttl) return c.data;
   return null;
 }
-function setCache(key, data) { ppiCache.set(key, { data, ts: Date.now() }); }
+function setCache(key, data, ttl) { ppiCache.set(key, { data, ts: Date.now(), ttl }); }
 
 async function ppiConcurrent(tasks, limit = PPI_CONCURRENCY) {
   const results = [];
@@ -322,6 +364,182 @@ app.post('/api/ppi/bonds/batch', async (req, res) => {
 app.post('/api/ppi/cache/clear', (req, res) => { ppiCache.clear(); res.json({ ok: true }); });
 
 app.get('/api/ppi/status', async (req, res) => { res.json({ authenticated: !!ppiToken, tokenExpired: ppiExpired(), supabase: !!SUPA_URL }); });
+
+// ══════════════════════════════════════════════
+//  PPI · SearchInstrument (fuente única de identidad)
+//  Endpoint confirmado: /api/1.0/MarketData/SearchInstrument?ticker=X&type=X
+//  Devuelve: ticker, description, type, market, currency
+//
+//  PPI NO expone endpoints públicos para lista de FCI, portfolio de FCI,
+//  tipo de fondo, mínimo de suscripción ni manager. Esos datos se
+//  capturan como input manual en el cliente (AssetPicker).
+// ══════════════════════════════════════════════
+const DESC_TTL = 60 * 60 * 1000; // 1 hora
+
+// Raw fetch — no rompe si la respuesta no es JSON (útil para diagnósticos).
+function ppiFetchRaw(path, opts = {}) {
+  return new Promise((resolve) => {
+    const url = new URL(path, PPI_BASE);
+    const req = https.request({ method: opts.method || 'GET', hostname: url.hostname, port: 443, path: url.pathname + url.search, headers: { 'Content-Type': 'application/json', ...opts.headers } }, res => {
+      let body = '';
+      res.on('data', c => body += c);
+      res.on('end', () => {
+        let data = null;
+        try { data = JSON.parse(body); } catch {}
+        resolve({ status: res.statusCode, data, body });
+      });
+    });
+    req.on('error', e => resolve({ status: 0, data: null, body: '', error: e.message }));
+    if (opts.body) req.write(JSON.stringify(opts.body));
+    req.end();
+  });
+}
+
+// Mapeo tipo interno (app) → tipo PPI (SearchInstrument).
+// PPI solo acepta: BONOS, LETRAS, ON, ACCIONES, CEDEARS, FCI, CAUCIONES, OPCIONES, FUTUROS, ETF, NOBAC, LEBAC.
+// Nuestros BONOS_PUBLICOS / BONOS_CORP mapean a BONOS (PPI no distingue soberano vs subsoberano en la identidad).
+const PPI_TYPE_MAP = {
+  BONOS_PUBLICOS: 'BONOS',
+  BONOS_CORP: 'BONOS',
+  // El resto es idéntico: ON, LETRAS, ACCIONES, CEDEARS, FCI, ETF, CAUCIONES, etc.
+};
+function mapToPpiType(t) { return PPI_TYPE_MAP[t] || t; }
+
+// Fuente de identidad única para cualquier instrumento. Cachea por (ticker, type).
+// Estrategia: primero intenta con type mapeado; si falla o no encuentra, cae a búsqueda sin type.
+async function searchInstrument(ticker, type) {
+  const T = String(ticker).toUpperCase();
+  const ppiType = type ? mapToPpiType(type) : null;
+  const key = `search|${T}|${ppiType || ''}`;
+  const cached = getCached(key);
+  if (cached !== null && cached !== undefined) return cached;
+
+  // Atajo de una query: primero typed, si no, ticker-only.
+  const attempts = [];
+  if (ppiType) attempts.push({ label: ppiType, qs: new URLSearchParams({ ticker: T, type: ppiType }) });
+  attempts.push({ label: '*', qs: new URLSearchParams({ ticker: T }) });
+
+  for (const { label, qs } of attempts) {
+    const path = `/api/${PPI_V}/MarketData/SearchInstrument?${qs}`;
+    const r = await ppiFetchRaw(path, { headers: ppiH() });
+    if (r.status === 200 && r.data != null) {
+      const arr = Array.isArray(r.data) ? r.data : (r.data.data || r.data.instruments || [r.data]);
+      const match = arr.find(x => String(x.ticker || x.symbol || x.code || '').toUpperCase() === T) || arr[0] || null;
+      if (match) {
+        const desc = match.description || match.name || match.denomination || '—';
+        console.log(`[PPI] search ${T}/${label} → "${desc}"`);
+        setCache(key, match, DESC_TTL);
+        return match;
+      }
+      const preview = (r.body || '').slice(0, 160).replace(/\s+/g, ' ');
+      console.log(`[PPI] search ${T}/${label} → HTTP 200 pero sin match · body: ${preview}`);
+    } else {
+      const preview = (r.body || '').slice(0, 120).replace(/\s+/g, ' ');
+      console.log(`[PPI] search ${T}/${label} → HTTP ${r.status} ${preview}`);
+    }
+  }
+  // Todos los intentos fallaron → miss
+  setCache(key, null, 10 * 60 * 1000);
+  return null;
+}
+
+async function fetchInstrumentDescription(ticker, type) {
+  const info = await searchInstrument(ticker, type);
+  if (!info) return null;
+  return info.description || info.name || info.longName || info.denomination || info.shortDescription || null;
+}
+
+// FCI: PPI solo expone nombre + moneda vía SearchInstrument.
+// El resto (tipo de fondo, mínimo, composición) es input manual en el cliente.
+async function fetchFciInfo(ticker) {
+  const T = String(ticker).toUpperCase();
+  const info = await searchInstrument(T, 'FCI');
+  if (!info) {
+    return { found: false, ticker: T, type: 'FCI', error: `FCI "${T}" no encontrado en PPI (SearchInstrument no devolvió resultados).` };
+  }
+  const name = info.description || info.name || info.denomination || info.fundName || T;
+  return {
+    found: true,
+    ticker: T,
+    type: 'FCI',
+    price: null,
+    variation: null,
+    currency: info.currency || info.denominationCurrency || info.fundCurrency || null,
+    description: name,
+    fci: {
+      name,
+      // PPI no expone estos campos → el asesor los ingresa manualmente en el AssetPicker.
+      fundType: null,
+      horizon: null,
+      profile: null,
+      minInvestment: null,
+      manager: null,
+      portfolio: [],
+    },
+    snapshot_at: new Date().toISOString(),
+  };
+}
+
+// Endpoint FCI: resuelve identidad (nombre + moneda) vía SearchInstrument.
+app.get('/api/ppi/fci/info', async (req, res) => {
+  try {
+    await getPPIToken();
+    const { ticker } = req.query;
+    if (!ticker) return res.status(400).json({ error: 'ticker required' });
+    const r = await fetchFciInfo(String(ticker).toUpperCase());
+    res.json(r);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Lista de FCI: PPI no expone endpoint público → devolvemos vacío.
+// El cliente resuelve nombre/moneda por ticker directo vía /api/ppi/fci/info.
+app.get('/api/ppi/fci/list', async (req, res) => {
+  res.json([]);
+});
+
+// ══════════════════════════════════════════════
+//  PPI · universal asset info (Propuestas)
+//  Solo identidad vía SearchInstrument: ticker + descripción + moneda + tipo.
+//  Sin precio, sin TIR/MD — para la sección Propuestas alcanza con eso.
+// ══════════════════════════════════════════════
+async function fetchAssetInfo(ticker, type, settlement = 'A-24HS') {
+  if (type === 'FCI') return fetchFciInfo(ticker);
+
+  const info = await searchInstrument(ticker, type);
+  if (!info) {
+    return { found: false, ticker: String(ticker).toUpperCase(), type, settlement, error: 'No encontrado en PPI (SearchInstrument)' };
+  }
+  return {
+    found: true,
+    ticker: String(ticker).toUpperCase(),
+    type,
+    settlement,
+    description: info.description || info.name || info.longName || info.denomination || null,
+    currency: info.currency || info.denominationCurrency || null,
+    snapshot_at: new Date().toISOString(),
+  };
+}
+
+app.get('/api/ppi/asset/info', async (req, res) => {
+  try {
+    await getPPIToken();
+    const { ticker, type, settlement } = req.query;
+    if (!ticker || !type) return res.status(400).json({ error: 'ticker and type required' });
+    const r = await fetchAssetInfo(String(ticker).toUpperCase(), type, settlement || 'A-24HS');
+    res.json(r);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/ppi/asset/batch', async (req, res) => {
+  try {
+    await getPPIToken();
+    const { items } = req.body || {};
+    if (!Array.isArray(items) || !items.length) return res.status(400).json({ error: 'items required' });
+    const tasks = items.map(it => () => fetchAssetInfo(String(it.ticker).toUpperCase(), it.type, it.settlement || 'A-24HS').catch(e => ({ ticker: it.ticker, type: it.type, found: false, error: e.message })));
+    const results = await ppiConcurrent(tasks);
+    res.json(results.map((r, i) => r.status === 'fulfilled' ? r.value : (r.value || { ticker: items[i].ticker, type: items[i].type, found: false, error: r.reason?.message })));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 
 // ══════════════════════════════════════════════
 //  PRIMARY API (WebSocket for tipo de cambio)

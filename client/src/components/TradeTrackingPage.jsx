@@ -14,6 +14,12 @@ const BROKER_COLORS = ['#3b82f6', '#22c55e', '#f59e0b', '#ec4899', '#a855f7', '#
 const GREEN = '#22c55e';
 const RED = '#ef4444';
 
+// ── Comisiones institucionales D&G (fijas) ──
+// Compra: se le suma 0,785% al monto (aranceles + derechos de mercado + IVA).
+// Venta: se multiplica lo recibido por 0,99214 (equivalente a ~0,786% de costo de venta).
+const BUY_COMM_PCT = 0.785;
+const SELL_FACTOR = 0.99214;
+
 function loadBrokers() {
   try {
     const custom = JSON.parse(localStorage.getItem('tt_brokers') || '[]');
@@ -181,8 +187,8 @@ export default function TradeTrackingPage({ marketData = {}, primaryConnected = 
             <div style={{ ...S.col, ...S.colDate }}>FECHA</div>
             <div style={{ ...S.col, ...S.colNum }}>ENTRADA</div>
             <div style={{ ...S.col, ...S.colNum }}>ACTUAL</div>
-            <div style={{ ...S.col, ...S.colNum }}>REND. %</div>
-            <div style={{ ...S.col, ...S.colNum }}>RESULT.</div>
+            <div style={{ ...S.col, ...S.colNum }}>REND. % B/N</div>
+            <div style={{ ...S.col, ...S.colNum }}>RESULT. B/N</div>
             <div style={{ ...S.col, ...S.colNum }}>DÍAS</div>
             <div style={{ ...S.col, ...S.colNum }}>OBJ.</div>
             <div style={{ ...S.col, ...S.colNum }}>STOP</div>
@@ -191,7 +197,8 @@ export default function TradeTrackingPage({ marketData = {}, primaryConnected = 
           {visibleTrades.map(t => {
             const q = getQuote(t); const m = computeMetrics(t, q.price);
             const priceColor = q.price == null ? 'var(--text-dim)' : (q.price >= t.price ? GREEN : RED);
-            const totalResult = m ? m.retAbs * t.quantity : null;
+            const grossTotal = m ? m.grossRetAbs * t.quantity : null;
+            const netTotal = m ? m.netRetAbs * t.quantity : null;
             const tgtPrice = resolveTargetPrice(t);
             return (
               <div
@@ -213,8 +220,14 @@ export default function TradeTrackingPage({ marketData = {}, primaryConnected = 
                 <div style={{ ...S.col, ...S.colDate }}>{fmtDate(t.trade_date)}</div>
                 <div style={{ ...S.col, ...S.colNum }}>${fmtN(t.price)}</div>
                 <div style={{ ...S.col, ...S.colNum, color: priceColor, fontWeight: 700 }}>{q.price != null ? `$${fmtN(q.price)}` : '…'}</div>
-                <div style={{ ...S.col, ...S.colNum, color: signColor(m?.retPct), fontWeight: 700 }}>{m ? fmtPct(m.retPct) : '—'}</div>
-                <div style={{ ...S.col, ...S.colNum, color: signColor(totalResult), fontWeight: 700 }}>{totalResult != null ? `${totalResult >= 0 ? '+' : ''}$${fmtN(totalResult)}` : '—'}</div>
+                <div style={{ ...S.col, ...S.colNum }}>
+                  <div style={{ color: signColor(m?.grossRetPct), fontWeight: 700 }}>{m ? fmtPct(m.grossRetPct) : '—'}</div>
+                  <div style={{ color: signColor(m?.netRetPct), fontSize: 9, opacity: 0.85 }}>{m ? `neto ${fmtPct(m.netRetPct)}` : ''}</div>
+                </div>
+                <div style={{ ...S.col, ...S.colNum }}>
+                  <div style={{ color: signColor(grossTotal), fontWeight: 700 }}>{grossTotal != null ? `${grossTotal >= 0 ? '+' : ''}$${fmtN(grossTotal)}` : '—'}</div>
+                  <div style={{ color: signColor(netTotal), fontSize: 9, opacity: 0.85 }}>{netTotal != null ? `neto ${netTotal >= 0 ? '+' : ''}$${fmtN(netTotal)}` : ''}</div>
+                </div>
                 <div style={{ ...S.col, ...S.colNum }}>{m?.days ?? '—'}</div>
                 <div style={{ ...S.col, ...S.colNum }}>{tgtPrice != null ? `$${fmtN(tgtPrice)}` : '—'}</div>
                 <div style={{ ...S.col, ...S.colNum, color: t.stop_loss != null ? RED : 'var(--text-dim)' }}>{t.stop_loss != null ? `$${fmtN(t.stop_loss)}` : '—'}</div>
@@ -241,16 +254,35 @@ export default function TradeTrackingPage({ marketData = {}, primaryConnected = 
 // ══════════════════════════════════════════════
 function computeMetrics(t, currentPrice) {
   if (currentPrice == null || t.price == null) return null;
-  const retAbs = currentPrice - t.price;
-  const retPct = (retAbs / t.price) * 100;
+  // Costo efectivo de compra por unidad: precio + 0,785%.
+  const investedPerUnit = t.price * (1 + BUY_COMM_PCT / 100);
+  // Monto efectivo recibido por unidad al vender: precio actual × 0,99214.
+  const sellPerUnit = currentPrice * SELL_FACTOR;
+
+  // Bruto: sin comisiones.
+  const grossRetAbs = currentPrice - t.price;
+  const grossRetPct = (grossRetAbs / t.price) * 100;
+  // Neto: incluye comisión de compra (+0,785%) y de venta (×0,99214).
+  const netRetAbs = sellPerUnit - investedPerUnit;
+  const netRetPct = (netRetAbs / investedPerUnit) * 100;
+
   const days = daysBetween(t.trade_date, new Date());
-  const annualized = days > 0 ? ((Math.pow(currentPrice / t.price, 365 / days) - 1) * 100) : null;
+  const grossAnnualized = days > 0 ? ((Math.pow(currentPrice / t.price, 365 / days) - 1) * 100) : null;
+  const netAnnualized = days > 0 && investedPerUnit > 0 ? ((Math.pow(sellPerUnit / investedPerUnit, 365 / days) - 1) * 100) : null;
+
   const tgtPrice = resolveTargetPrice(t);
   let targetRemPct = null;
   if (tgtPrice != null) targetRemPct = ((tgtPrice - currentPrice) / currentPrice) * 100;
   const stopHit = t.stop_loss != null && currentPrice <= t.stop_loss;
   const stopDistPct = t.stop_loss != null ? ((currentPrice - t.stop_loss) / currentPrice) * 100 : null;
-  return { retAbs, retPct, days, annualized, targetRemPct, stopHit, stopDistPct, tgtPrice };
+
+  // retAbs/retPct/annualized se mantienen como alias brutos para compatibilidad.
+  return {
+    retAbs: grossRetAbs, retPct: grossRetPct, annualized: grossAnnualized,
+    grossRetAbs, grossRetPct, grossAnnualized,
+    netRetAbs, netRetPct, netAnnualized,
+    days, targetRemPct, stopHit, stopDistPct, tgtPrice, investedPerUnit, sellPerUnit,
+  };
 }
 
 function Metric({ l, v, color }) {
@@ -514,7 +546,12 @@ function TradeForm({ trade, onSave, onClose, editMode, brokers, addBroker, remov
           <div style={S.formRow}>
             <F l="Precio entrada" req><input type="number" step="0.01" style={S.input} value={f.price} onChange={e => up('price', e.target.value)} placeholder="0.00" /></F>
             <F l="Cantidad (nominales)"><input type="number" step="1" style={S.input} value={f.quantity} onChange={e => up('quantity', e.target.value)} placeholder="100" /></F>
-            <F l="Comisión compra (%)"><input type="number" step="0.01" min="0" style={S.input} value={f.commission} onChange={e => up('commission', e.target.value)} placeholder="0.00" /></F>
+            <F l="Comisión (institucional)">
+              <div style={{ ...S.input, display: 'flex', alignItems: 'center', justifyContent: 'space-between', color: 'var(--text-dim)', fontSize: 11, padding: '8px 10px' }}>
+                <span>Compra +{fmtN(BUY_COMM_PCT)}%</span>
+                <span>Venta ×{fmtN(SELL_FACTOR, 5)}</span>
+              </div>
+            </F>
           </div>
           <div style={S.formRow}>
             <F l="Tipo objetivo">
@@ -572,10 +609,10 @@ function F({ l, req, children }) {
 function TradeDetail({ trade, quote, brokers, onClose, onFlyer }) {
   const m = computeMetrics(trade, quote?.price);
   const priceColor = quote?.price == null ? 'var(--text-dim)' : (quote.price >= trade.price ? GREEN : RED);
-  const totalResult = m ? m.retAbs * trade.quantity : null;
-  const commission = Number(trade.commission) || 0;
-  const commissionAmount = trade.price != null && trade.quantity != null ? (trade.price * trade.quantity * commission / 100) : 0;
-  const totalOperado = trade.price != null && trade.quantity != null ? (trade.price * trade.quantity + commissionAmount) : null;
+  const grossTotal = m ? m.grossRetAbs * trade.quantity : null;
+  const netTotal = m ? m.netRetAbs * trade.quantity : null;
+  const buyCommAmount = trade.price != null && trade.quantity != null ? (trade.price * trade.quantity * BUY_COMM_PCT / 100) : 0;
+  const totalOperado = trade.price != null && trade.quantity != null ? (trade.price * trade.quantity + buyCommAmount) : null;
   const tgtPrice = resolveTargetPrice(trade);
   useEffect(() => {
     const h = e => { if (e.key === 'Escape') onClose(); };
@@ -606,8 +643,9 @@ function TradeDetail({ trade, quote, brokers, onClose, onFlyer }) {
             <DR l="Precio entrada" v={`$${fmtN(trade.price)}`} />
             <DR l="Precio actual" v={quote?.price != null ? `$${fmtN(quote.price)}` : '...'} color={priceColor} />
             <DR l="Cantidad (nominales)" v={fmtN(trade.quantity, 0)} />
-            <DR l="Comisión" v={`${fmtN(commission)}% ($${fmtN(commissionAmount)})`} />
-            <DR l="Total operado" v={totalOperado != null ? `$${fmtN(totalOperado)}` : '—'} />
+            <DR l="Comisión compra" v={`${fmtN(BUY_COMM_PCT)}% ($${fmtN(buyCommAmount)})`} />
+            <DR l="Factor venta" v={`×${fmtN(SELL_FACTOR, 5)}`} />
+            <DR l="Total operado (compra)" v={totalOperado != null ? `$${fmtN(totalOperado)}` : '—'} />
             <DR l="Objetivo" v={tgtPrice != null ? `$${fmtN(tgtPrice)}${trade.target_type === 'yield' ? ` (${fmtN(trade.target_value)}%)` : ''}` : '—'} color={tgtPrice != null ? GREEN : 'var(--text)'} />
             <DR l="Stop loss" v={trade.stop_loss != null ? `$${fmtN(trade.stop_loss)}` : '—'} color={trade.stop_loss != null ? RED : 'var(--text)'} />
           </div>
@@ -616,11 +654,13 @@ function TradeDetail({ trade, quote, brokers, onClose, onFlyer }) {
             <div style={S.sec}>
               <div style={S.secT}>MÉTRICAS DE RENDIMIENTO</div>
               <div style={S.metricsRow}>
-                <Metric l="Rend. %" v={fmtPct(m.retPct)} color={signColor(m.retPct)} />
-                <Metric l="Rend. $ / unidad" v={`${m.retAbs >= 0 ? '+' : ''}$${fmtN(m.retAbs)}`} color={signColor(m.retAbs)} />
-                <Metric l="Resultado total" v={`${totalResult >= 0 ? '+' : ''}$${fmtN(totalResult)}`} color={signColor(totalResult)} />
+                <Metric l="Rend. % bruto" v={fmtPct(m.grossRetPct)} color={signColor(m.grossRetPct)} />
+                <Metric l="Rend. % neto" v={fmtPct(m.netRetPct)} color={signColor(m.netRetPct)} />
+                <Metric l="Resultado bruto" v={`${grossTotal >= 0 ? '+' : ''}$${fmtN(grossTotal)}`} color={signColor(grossTotal)} />
+                <Metric l="Resultado neto" v={`${netTotal >= 0 ? '+' : ''}$${fmtN(netTotal)}`} color={signColor(netTotal)} />
                 <Metric l="Días" v={m.days} />
-                {m.annualized != null && <Metric l="TNA %" v={fmtPct(m.annualized)} color={signColor(m.annualized)} />}
+                {m.grossAnnualized != null && <Metric l="TNA bruta" v={fmtPct(m.grossAnnualized)} color={signColor(m.grossAnnualized)} />}
+                {m.netAnnualized != null && <Metric l="TNA neta" v={fmtPct(m.netAnnualized)} color={signColor(m.netAnnualized)} />}
                 {m.targetRemPct != null && <Metric l="Falta al objetivo" v={fmtPct(m.targetRemPct)} color={m.targetRemPct > 0 ? 'var(--text)' : GREEN} />}
                 {m.stopDistPct != null && <Metric l="Dist. stop" v={fmtPct(m.stopDistPct)} color={m.stopDistPct > 5 ? 'var(--text)' : RED} />}
               </div>
@@ -676,10 +716,10 @@ function TradeFlyer({ trade, quote, brokers, onClose }) {
   const logoSrc = theme === 'dark' ? '/logos/DG%20tema%20oscuro.png' : '/logos/DG-tema-claro.svg';
 
   const m = computeMetrics(trade, quote?.price);
-  const totalResult = m ? m.retAbs * trade.quantity : null;
-  const commission = Number(trade.commission) || 0;
-  const commissionAmount = trade.price != null && trade.quantity != null ? (trade.price * trade.quantity * commission / 100) : 0;
-  const totalOperado = trade.price != null && trade.quantity != null ? (trade.price * trade.quantity + commissionAmount) : null;
+  const grossTotal = m ? m.grossRetAbs * trade.quantity : null;
+  const netTotal = m ? m.netRetAbs * trade.quantity : null;
+  const buyCommAmount = trade.price != null && trade.quantity != null ? (trade.price * trade.quantity * BUY_COMM_PCT / 100) : 0;
+  const totalOperado = trade.price != null && trade.quantity != null ? (trade.price * trade.quantity + buyCommAmount) : null;
   const tgtPrice = resolveTargetPrice(trade);
 
   const cap = async (a) => {
@@ -712,11 +752,11 @@ function TradeFlyer({ trade, quote, brokers, onClose }) {
         </div>
         <div ref={ref} style={{ background: 'var(--bg)', borderRadius: 8, overflow: 'hidden', border: '1px solid var(--border)' }}>
           <div style={{ padding: '24px 24px 16px', borderBottom: '2px solid var(--neon)' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 20, flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 20, flexWrap: 'wrap' }}>
               <img src={logoSrc} alt="Delfino Gaviña" crossOrigin="anonymous" style={{ height: 48, width: 'auto', display: 'block', flexShrink: 0 }} />
-              <div style={{ fontWeight: 900, fontSize: 18, letterSpacing: 6, color: 'var(--neon)' }}>TRADE TRACKING</div>
+              <div style={{ fontFamily: "'Roboto Mono',monospace", fontSize: 11, color: 'var(--text-dim)' }}>{new Date().toLocaleDateString('es-AR', { day: '2-digit', month: 'long', year: 'numeric' })}</div>
             </div>
-            <div style={{ fontFamily: "'Roboto Mono',monospace", fontSize: 11, color: 'var(--text-dim)', marginTop: 10 }}>{new Date().toLocaleDateString('es-AR', { day: '2-digit', month: 'long', year: 'numeric' })}</div>
+            <div style={{ fontWeight: 900, fontSize: 18, letterSpacing: 6, color: 'var(--neon)', textAlign: 'center', marginTop: 14 }}>TRADE TRACKING</div>
           </div>
 
           <div style={{ padding: '20px 24px' }}>
@@ -751,10 +791,11 @@ function TradeFlyer({ trade, quote, brokers, onClose }) {
             {m && (
               <>
                 <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 3, color: 'var(--neon)', marginBottom: 10 }}>RENDIMIENTO</div>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10, marginBottom: 16 }}>
-                  <Metric l="Rend. %" v={fmtPct(m.retPct)} color={signColor(m.retPct)} />
-                  <Metric l="Rend. $ / unidad" v={`${m.retAbs >= 0 ? '+' : ''}$${fmtN(m.retAbs)}`} color={signColor(m.retAbs)} />
-                  <Metric l="Resultado total" v={`${totalResult >= 0 ? '+' : ''}$${fmtN(totalResult)}`} color={signColor(totalResult)} />
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10, marginBottom: 16 }}>
+                  <Metric l="Rend. % bruto" v={fmtPct(m.grossRetPct)} color={signColor(m.grossRetPct)} />
+                  <Metric l="Rend. % neto" v={fmtPct(m.netRetPct)} color={signColor(m.netRetPct)} />
+                  <Metric l="Resultado bruto" v={`${grossTotal >= 0 ? '+' : ''}$${fmtN(grossTotal)}`} color={signColor(grossTotal)} />
+                  <Metric l="Resultado neto" v={`${netTotal >= 0 ? '+' : ''}$${fmtN(netTotal)}`} color={signColor(netTotal)} />
                 </div>
                 <ProgressBar trade={trade} quote={quote?.price} />
               </>

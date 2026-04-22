@@ -8,9 +8,10 @@ import BonosSoberanos from './components/BonosSoberanos';
 import BonosSubsoberanos from './components/BonosSubsoberanos';
 import CarterasPage from './components/CarterasPage';
 import TradeTrackingPage from './components/TradeTrackingPage';
+import PropuestasPage from './components/PropuestasPage';
 
 const TICKERS = ['AL30', 'AL30D', 'AL30C'];
-const TABS = [{ id: 'fx', label: 'TIPO DE CAMBIO' }, { id: 'rf', label: 'RENTA FIJA CORP.' }, { id: 'sob', label: 'BONOS SOBERANOS' }, { id: 'sub', label: 'SUBSOBERANOS' }, { id: 'cart', label: 'CARTERAS' }, { id: 'trades', label: 'TRADE TRACKING' }];
+const TABS = [{ id: 'fx', label: 'TIPO DE CAMBIO' }, { id: 'rf', label: 'RENTA FIJA CORP.' }, { id: 'sob', label: 'BONOS SOBERANOS' }, { id: 'sub', label: 'SUBSOBERANOS' }, { id: 'cart', label: 'CARTERAS' }, { id: 'trades', label: 'TRADE TRACKING' }, { id: 'prop', label: 'PROPUESTAS' }];
 
 export default function App() {
   const { data, connected, primaryConnected } = useMarketData();
@@ -41,6 +42,8 @@ export default function App() {
       {activeTab === 'cart' && <section><SH title="CARTERAS" /><p style={st.sectionSub}>Gestión de carteras de inversión</p><CarterasPage /></section>}
 
       {activeTab === 'trades' && <section><SH title="TRADE TRACKING" /><p style={st.sectionSub}>Seguimiento de operaciones con cotización en tiempo real · WebSocket Primary · A-24HS</p><TradeTrackingPage marketData={data} primaryConnected={primaryConnected} /></section>}
+
+      {activeTab === 'prop' && <section><SH title="PROPUESTAS DE INVERSIÓN" /><p style={st.sectionSub}>Armado de carteras y flyer institucional</p><PropuestasPage /></section>}
 
       <footer style={st.footer}><span style={st.footerText}>DELFINO GAVIÑA · Inversiones · Primary API · MATBA ROFEX · ByMA · PPI</span></footer>
     </div>
