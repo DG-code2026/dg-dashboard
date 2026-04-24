@@ -14,21 +14,36 @@
   --green: #39FF14;
   --green-dim: #39FF1480;
   --green-glow: 0 0 8px #39FF1440, 0 0 20px #39FF1420;
-  --bg: #0A0F1C;
-  --bg-card: #111729;
-  --bg-card-hover: #162034;
-  --border: #1E2A45;
+  /* Paleta corrida un paso hacia arriba en la escala institucional: el page bg
+     pasa de --dg-darkest a --dg-navy, y los tonos de card/border/input se
+     recomputan alrededor de esa nueva base. Cards un pelo más claras que el bg
+     para mantener relieve; inputs un pelo más oscuros para que "se hundan". */
+  --bg: #1A2236;
+  --bg-card: #232E48;
+  --bg-card-hover: #2B3858;
+  --border: #2E3D5E;
   --border-neon: #6386AC30;
   --text: #D8DDE8;
-  --text-dim: #6B7A99;
+  --text-dim: #7D8BA8;
   --red: #E85D5D;
   --red-dim: #E85D5D80;
-  --input-bg: #0D1220;
-  --th-bg: rgba(99,134,172,0.04);
-  --row-alt: rgba(99,134,172,0.02);
-  --row-hover: rgba(99,134,172,0.06);
+  --input-bg: #131B2D;
+  --th-bg: rgba(99,134,172,0.06);
+  --row-alt: rgba(99,134,172,0.03);
+  --row-hover: rgba(99,134,172,0.08);
   --scanline-opacity: 0;
-  --debug-bg: #0D1220;
+  --debug-bg: #131B2D;
+
+  /* ── Calendario (HomePage) ──
+     Chips de pagos por tipo, halo de la celda "hoy" y glow del popover. */
+  --cal-chip-renta-bg: rgba(0,255,170,0.08);
+  --cal-chip-renta-border: rgba(0,255,170,0.25);
+  --cal-chip-renta-fg: var(--neon);
+  --cal-chip-amort-bg: rgba(148,163,184,0.14);
+  --cal-chip-amort-border: rgba(148,163,184,0.30);
+  --cal-chip-amort-fg: var(--text);
+  --cal-today-glow: 0 0 6px rgba(0,255,170,0.18), inset 0 0 4px rgba(0,255,170,0.05);
+  --cal-popover-glow: 0 8px 20px rgba(0,0,0,0.45), 0 0 10px rgba(0,255,170,0.15);
 }
 
 [data-theme="light"] {
@@ -54,6 +69,18 @@
   --row-hover: rgba(26,34,54,0.05);
   --scanline-opacity: 0;
   --debug-bg: #EEEDE8;
+
+  /* ── Calendario — tema claro.
+     Verde institucional para renta y slate para amortización; más opacidad
+     en borde y halo para que resalten sobre fondo cream. */
+  --cal-chip-renta-bg: rgba(21,128,61,0.14);
+  --cal-chip-renta-border: rgba(21,128,61,0.60);
+  --cal-chip-renta-fg: #15803D;
+  --cal-chip-amort-bg: rgba(71,85,105,0.14);
+  --cal-chip-amort-border: rgba(71,85,105,0.55);
+  --cal-chip-amort-fg: #334155;
+  --cal-today-glow: 0 0 6px rgba(22,163,74,0.35), inset 0 0 4px rgba(22,163,74,0.10);
+  --cal-popover-glow: 0 8px 20px rgba(0,0,0,0.15), 0 0 10px rgba(22,163,74,0.25);
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -61,3 +88,7 @@ body { font-family: 'Montserrat', sans-serif; background: var(--bg); color: var(
 @keyframes pulse-neon { 0%,100%{opacity:1} 50%{opacity:0.7} }
 @keyframes fade-in { from{opacity:0;transform:translateY(12px)} to{opacity:1;transform:translateY(0)} }
 @keyframes spin { to{transform:rotate(360deg)} }
+
+/* Oculta la scrollbar en contenedores con overflow — mantiene el scroll funcional. */
+.no-scrollbar { scrollbar-width: none; -ms-overflow-style: none; }
+.no-scrollbar::-webkit-scrollbar { display: none; width: 0; height: 0; }

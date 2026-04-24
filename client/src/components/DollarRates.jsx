@@ -4,7 +4,6 @@ import SharePriceModal from './SharePriceModal';
 
 export default function DollarRates({ data, commission }) {
   const c = commission;
-  const ch = commission / 2;
   const [showCalc, setShowCalc] = useState(false);
   const [shareSpec, setShareSpec] = useState(null);
 
@@ -27,6 +26,10 @@ export default function DollarRates({ data, commission }) {
     const jCS = (al30c.bid / al30d.offer) - 1;
     const jVS = (al30d.bid / al30c.offer) - 1;
 
+    // Canje: comisión completa en AMBAS patas (compra de un bono + venta del
+    // otro) → idéntico criterio que MEP/CCL y que la calculadora de rotaciones.
+    // Antes se usaba media comisión en cada lado, lo que daba comisión total ≈
+    // "c" en vez de "2·c", sub-reportando el costo del canje real.
     return {
       mep: {
         compra: { sin: mCS, con: (al30.offer * (1 + c)) / (al30d.bid * (1 - c)), var: prevMep ? (mCS - prevMep) / prevMep : null },
@@ -37,11 +40,11 @@ export default function DollarRates({ data, commission }) {
         venta: { sin: cVS, con: (al30.bid * (1 - c)) / (al30c.offer * (1 + c)), var: prevCcl ? (cVS - prevCcl) / prevCcl : null },
       },
       canje: {
-        compra: { sin: jCS, con: ((al30c.bid * (1 - ch)) / (al30d.offer * (1 + ch))) - 1, var: prevCanjeC != null ? jCS - prevCanjeC : null },
-        venta: { sin: jVS, con: ((al30d.bid * (1 - ch)) / (al30c.offer * (1 + ch))) - 1, var: prevCanjeV != null ? jVS - prevCanjeV : null },
+        compra: { sin: jCS, con: ((al30c.bid * (1 - c)) / (al30d.offer * (1 + c))) - 1, var: prevCanjeC != null ? jCS - prevCanjeC : null },
+        venta: { sin: jVS, con: ((al30d.bid * (1 - c)) / (al30c.offer * (1 + c))) - 1, var: prevCanjeV != null ? jVS - prevCanjeV : null },
       },
     };
-  }, [data, c, ch]);
+  }, [data, c]);
 
   if (!rates) return <div style={S.loading}><span style={S.loadingText}>Esperando datos de los 3 tickers...</span></div>;
 

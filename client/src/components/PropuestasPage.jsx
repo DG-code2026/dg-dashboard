@@ -140,6 +140,11 @@ function PropuestaEditor({ initial, onCancel, onSaved }) {
     amount_total: initial.amount_total ?? '',
     currency: initial.currency || 'ARS',
     notes: initial.notes || '',
+    // Override del KPI "Cantidad de activos": cuando enabled, se reemplaza
+    // el valor (y el label) de esa tarjeta por un texto libre definido por el usuario.
+    override_count_enabled: !!initial.override_count_enabled,
+    override_count_label: initial.override_count_label || '',
+    override_count_value: initial.override_count_value || '',
   }));
   const [items, setItems] = useState(() => Array.isArray(initial.items) ? initial.items : []);
   const [saving, setSaving] = useState(false);
@@ -159,6 +164,9 @@ function PropuestaEditor({ initial, onCancel, onSaved }) {
       snapshot_fci: asset.fci || null,
       snapshot_at: asset.snapshot_at || new Date().toISOString(),
       alloc_pct: 0,
+      // Nominales manuales — opcional. null = no especificado.
+      // Se muestra en el flyer cuando el toggle "Mostrar nominales" está activo.
+      nominales: null,
       // Campos para carga manual (fuera de PPI): el usuario declara tipo, nombre y clase RF/RV.
       is_manual: !!asset.is_manual,
       manual_type_label: asset.manual_type_label || null,
@@ -167,6 +175,12 @@ function PropuestaEditor({ initial, onCancel, onSaved }) {
   };
 
   const removeItem = (idx) => setItems(prev => prev.filter((_, i) => i !== idx));
+
+  // Actualiza los nominales manuales del ítem i. Vacío = null (no especificado).
+  const updateItemNominales = (idx, raw) => {
+    const v = raw === '' ? null : Math.max(0, Number(raw) || 0);
+    setItems(prev => prev.map((it, i) => i === idx ? { ...it, nominales: v } : it));
+  };
 
   const updateItemPct = (idx, pct) => {
     const raw = Math.max(0, Number(pct) || 0);
@@ -231,11 +245,21 @@ function PropuestaEditor({ initial, onCancel, onSaved }) {
         ...form,
         amount_total: form.amount_total === '' ? null : Number(form.amount_total),
         items,
+        // Los overrides van al top-level; el server los whitelistea antes de hablar con Supabase.
+        override_count_enabled: !!form.override_count_enabled,
+        override_count_label: form.override_count_label || '',
+        override_count_value: form.override_count_value || '',
       };
-      if (isEdit) {
-        await fetch(`${API}/api/db/propuestas/${initial.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-      } else {
-        await fetch(`${API}/api/db/propuestas`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      const url = isEdit
+        ? `${API}/api/db/propuestas/${initial.id}`
+        : `${API}/api/db/propuestas`;
+      const method = isEdit ? 'PATCH' : 'POST';
+      const r = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      if (!r.ok) {
+        let msg = `HTTP ${r.status}`;
+        try { const d = await r.json(); msg = d.error || d.message || msg; } catch {}
+        alert('Error guardando: ' + msg);
+        return;
       }
       onSaved();
     } catch (e) { alert('Error guardando: ' + e.message); }
@@ -322,6 +346,7 @@ function PropuestaEditor({ initial, onCancel, onSaved }) {
                 <div style={{ ...S.itemCol, ...S.iColTypeWide }}>TIPO / DESCRIPCIÓN</div>
                 <div style={{ ...S.itemCol, ...S.iColNum }}>MONEDA</div>
                 <div style={{ ...S.itemCol, ...S.iColInput }}>%</div>
+                <div style={{ ...S.itemCol, ...S.iColNominales }} title="Cantidad de nominales (opcional)">NOMINALES</div>
                 <div style={{ ...S.itemCol, ...S.iColAction }} />
               </div>
               {items.map((it, i) => {
@@ -348,6 +373,16 @@ function PropuestaEditor({ initial, onCancel, onSaved }) {
                       </button>
                     )}
                   </div>
+                  <div style={{ ...S.itemCol, ...S.iColNominales }}>
+                    <input
+                      type="number" step="1" min="0"
+                      style={S.smallInput}
+                      value={it.nominales ?? ''}
+                      onChange={e => updateItemNominales(i, e.target.value)}
+                      placeholder="—"
+                      title="Cantidad de nominales (opcional). Se muestra en el flyer cuando está habilitado 'Mostrar nominales'."
+                    />
+                  </div>
                   <div style={{ ...S.itemCol, ...S.iColAction }}>
                     <button style={{ ...S.iconBtn, color: RED }} onClick={() => removeItem(i)} title="Quitar">×</button>
                   </div>
@@ -365,9 +400,46 @@ function PropuestaEditor({ initial, onCancel, onSaved }) {
       {/* Métricas agregadas */}
       {items.length > 0 && (
         <div style={S.section}>
-          <div style={S.secT}>MÉTRICAS AGREGADAS</div>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10, flexWrap: 'wrap', gap: 10 }}>
+            <div style={S.secT}>MÉTRICAS AGREGADAS</div>
+            {/* Override del KPI "Cantidad de activos".
+                Cuando enabled, la tarjeta "Activos" se reemplaza por un dato libre tipeado por el usuario
+                — útil para reportes donde no tiene sentido mostrar cantidad de líneas (ej. "3 clases de riesgo"). */}
+            <label style={S.overrideToggle} title="Reemplazar la tarjeta 'Activos' por un dato tipeado a mano">
+              <input
+                type="checkbox"
+                checked={!!form.override_count_enabled}
+                onChange={e => up('override_count_enabled', e.target.checked)}
+                style={{ margin: 0 }}
+              />
+              <span>USAR DATO MANUAL EN LUGAR DE CANTIDAD DE ACTIVOS</span>
+            </label>
+          </div>
+          {form.override_count_enabled && (
+            <div style={S.overrideRow}>
+              <F l="Etiqueta" style={{ flex: 1 }}>
+                <input
+                  style={S.input}
+                  value={form.override_count_label}
+                  onChange={e => up('override_count_label', e.target.value)}
+                  placeholder="Ej: Clases de riesgo · Internacionales · Emisores distintos…"
+                />
+              </F>
+              <F l="Valor" style={{ flex: 1 }}>
+                <input
+                  style={S.input}
+                  value={form.override_count_value}
+                  onChange={e => up('override_count_value', e.target.value)}
+                  placeholder="Ej: 3 · Investment grade · Tres regiones…"
+                />
+              </F>
+            </div>
+          )}
           <div style={S.metricsGrid}>
-            <AggCard l="Activos" v={items.length} />
+            <AggCard
+              l={form.override_count_enabled && form.override_count_label ? form.override_count_label : 'Activos'}
+              v={form.override_count_enabled ? (form.override_count_value || '—') : items.length}
+            />
             <AggCard l="% Renta Fija" v={`${fmtN(agg.pctFija)}%`} />
             <AggCard l="% Renta Variable" v={`${fmtN(agg.pctVariable)}%`} />
           </div>
@@ -710,6 +782,11 @@ function FlyerModal({ form, items, agg, onClose }) {
   const [err, setErr] = useState('');
   // Opción: mostrar el monto estimado ($) al lado de cada % de activo. Solo tiene sentido si hay monto total.
   const [showAmounts, setShowAmounts] = useState(false);
+  // Opción independiente: mostrar la cantidad de nominales (tipeada a mano en cada ítem).
+  // Puede combinarse con MOSTRAR MONTOS — ambos aparecen en la línea de cada activo.
+  const [showNominales, setShowNominales] = useState(false);
+  // ¿Algún ítem tiene nominales cargados? Si no, el toggle queda deshabilitado.
+  const anyNominales = Array.isArray(items) && items.some(it => Number(it?.nominales) > 0);
   // Modo de vista del modal: 'flyer' (PNG institucional) | 'a4' (hoja A4 con tortas, PDF).
   const [viewMode, setViewMode] = useState('flyer');
   // html2canvas no rasteriza confiablemente el SVG con PNG embebido + clipPath + filter CSS.
@@ -851,6 +928,19 @@ function FlyerModal({ form, items, agg, onClose }) {
               />
               MOSTRAR MONTOS
             </label>
+            <label
+              style={{ ...FS.tbBtn, display: 'inline-flex', alignItems: 'center', gap: 6, cursor: anyNominales ? 'pointer' : 'not-allowed', opacity: anyNominales ? 1 : 0.5 }}
+              title={anyNominales ? 'Muestra la cantidad de nominales (cargada en la tabla de activos) al lado del % de cada activo' : 'Cargá nominales en al menos un ítem de la propuesta para habilitar esta opción'}
+            >
+              <input
+                type="checkbox"
+                checked={showNominales && anyNominales}
+                onChange={e => setShowNominales(e.target.checked)}
+                disabled={!anyNominales}
+                style={{ margin: 0 }}
+              />
+              MOSTRAR NOMINALES
+            </label>
             {viewMode === 'flyer' ? (
               <>
                 <button style={FS.tbBtn} onClick={() => capture('copy')} disabled={dl} title="Copiar imagen al portapapeles">📋 COPIAR</button>
@@ -876,6 +966,7 @@ function FlyerModal({ form, items, agg, onClose }) {
               bgDataUrl={bgDataUrl}
               totalAmount={totalAmount}
               showAmounts={showAmounts && totalAmount > 0}
+              showNominales={showNominales && anyNominales}
               subtitleLine1={subtitleLine1}
               subtitleLine2={subtitleLine2}
             />
@@ -912,15 +1003,24 @@ function FlyerModal({ form, items, agg, onClose }) {
                 {form.asesor && <div style={FS.asesor}>Asesor: <b>{form.asesor}</b></div>}
               </div>
 
-              {/* Resumen en tres tarjetas alineadas: Monto · Activos · Tipo de renta */}
+              {/* Resumen en tres tarjetas alineadas: Monto · Activos (o dato manual) · Tipo de renta */}
               <div style={FS.summaryRow}>
                 <FMet l="MONTO ESTIMADO" v={totalAmount > 0 ? `${form.currency} ${fmtN(totalAmount, 0)}` : '—'} />
-                <FMet l="ACTIVOS" v={items.length} />
+                <FMet
+                  l={form.override_count_enabled && form.override_count_label ? form.override_count_label.toUpperCase() : 'ACTIVOS'}
+                  v={form.override_count_enabled ? (form.override_count_value || '—') : items.length}
+                />
                 <FRFRVSplit pctFija={agg.pctFija} pctVariable={agg.pctVariable} />
               </div>
 
               {/* Distribución por tipo de activo (agrupada con listado) */}
-              <FTypeDistribution items={items} totalAmount={totalAmount} currency={form.currency} showAmounts={showAmounts && totalAmount > 0} />
+              <FTypeDistribution
+                items={items}
+                totalAmount={totalAmount}
+                currency={form.currency}
+                showAmounts={showAmounts && totalAmount > 0}
+                showNominales={showNominales && anyNominales}
+              />
 
               {/* Notas (si hay) */}
               {form.notes && form.notes.trim() && (
@@ -1078,7 +1178,7 @@ function planA4Pages({ items, form }) {
   return pages;
 }
 
-function FlyerA4({ form, items, agg, bgDataUrl, totalAmount, showAmounts, subtitleLine1, subtitleLine2, pageRefs }) {
+function FlyerA4({ form, items, agg, bgDataUrl, totalAmount, showAmounts, showNominales, subtitleLine1, subtitleLine2, pageRefs }) {
   const pages = useMemo(() => planA4Pages({ items, form }), [items, form]);
   const totalPages = pages.length;
 
@@ -1116,6 +1216,7 @@ function FlyerA4({ form, items, agg, bgDataUrl, totalAmount, showAmounts, subtit
           bgDataUrl={bgDataUrl}
           totalAmount={totalAmount}
           showAmounts={showAmounts}
+          showNominales={showNominales}
           subtitleLine1={subtitleLine1}
           subtitleLine2={subtitleLine2}
           rfrvData={rfrvData}
@@ -1129,7 +1230,7 @@ function FlyerA4({ form, items, agg, bgDataUrl, totalAmount, showAmounts, subtit
 
 function A4Page({
   pageRef, pageIdx, totalPages, page,
-  form, items, agg, bgDataUrl, totalAmount, showAmounts,
+  form, items, agg, bgDataUrl, totalAmount, showAmounts, showNominales,
   subtitleLine1, subtitleLine2, rfrvData, typeData, assetData,
 }) {
   const amountCurrency = (form.currency === 'USD-MEP' || form.currency === 'USD-CCL') ? 'USD' : form.currency;
@@ -1166,7 +1267,10 @@ function A4Page({
               </div>
               <div style={FSA4.summaryRow}>
                 <FMet l="MONTO ESTIMADO" v={totalAmount > 0 ? `${form.currency} ${fmtN(totalAmount, 0)}` : '—'} />
-                <FMet l="ACTIVOS" v={items.length} />
+                <FMet
+                  l={form.override_count_enabled && form.override_count_label ? form.override_count_label.toUpperCase() : 'ACTIVOS'}
+                  v={form.override_count_enabled ? (form.override_count_value || '—') : items.length}
+                />
                 <FRFRVSplit pctFija={agg.pctFija} pctVariable={agg.pctVariable} />
               </div>
             </>
@@ -1214,6 +1318,9 @@ function A4Page({
                           {fmtN(it.alloc_pct)}%
                           {showAmounts && (
                             <span style={FS.typeGroupItemAmount}> · {amountCurrency} {fmtN(amountFor(it.alloc_pct), 0)}</span>
+                          )}
+                          {showNominales && Number(it.nominales) > 0 && (
+                            <span style={FS.typeGroupItemAmount}> · {fmtN(Number(it.nominales), 0)} nom.</span>
                           )}
                         </span>
                       </div>
@@ -1326,7 +1433,7 @@ function flyerCategoryLabel(cat) {
 // Orden fijo de categorías pedido por el usuario
 const FLYER_CATEGORY_ORDER = ['ACCIONES', 'BONOS', 'ON', 'CEDEARS', 'FCI', 'LETRAS'];
 
-function FTypeDistribution({ items, totalAmount = 0, currency = 'ARS', showAmounts = false }) {
+function FTypeDistribution({ items, totalAmount = 0, currency = 'ARS', showAmounts = false, showNominales = false }) {
   if (!items.length) return null;
   const groups = new Map();
   for (const it of items) {
@@ -1373,6 +1480,9 @@ function FTypeDistribution({ items, totalAmount = 0, currency = 'ARS', showAmoun
                     {fmtN(it.alloc_pct)}%
                     {showAmounts && (
                       <span style={FS.typeGroupItemAmount}> · {amountCurrency} {fmtN(amountFor(it.alloc_pct), 0)}</span>
+                    )}
+                    {showNominales && Number(it.nominales) > 0 && (
+                      <span style={FS.typeGroupItemAmount}> · {fmtN(Number(it.nominales), 0)} nom.</span>
                     )}
                   </span>
                 </div>
@@ -1683,6 +1793,7 @@ const S = {
   iColTypeWide: { flex: '1 1 260px', minWidth: 180, whiteSpace: 'nowrap', textOverflow: 'ellipsis' },
   iColNum: { flex: '0 0 80px', textAlign: 'right' },
   iColInput: { flex: '0 0 110px' },
+  iColNominales: { flex: '0 0 110px' },
   iColAction: { flex: '0 0 28px' },
   freeBtn: { background: 'transparent', border: '1px dashed var(--neon)', borderRadius: 2, color: 'var(--neon)', fontFamily: "'Roboto Mono',monospace", fontSize: 8, fontWeight: 700, letterSpacing: 1, padding: '3px 4px', cursor: 'pointer', whiteSpace: 'nowrap', lineHeight: 1.2 },
 
@@ -1690,4 +1801,8 @@ const S = {
   aggCard: { background: 'var(--row-alt)', borderRadius: 4, padding: '10px 12px', textAlign: 'center' },
   aggLbl: { fontSize: 8, fontWeight: 700, letterSpacing: 1.5, color: 'var(--text-dim)', marginBottom: 4, textTransform: 'uppercase' },
   aggVal: { fontFamily: "'Roboto Mono',monospace", fontSize: 14, fontWeight: 700, color: 'var(--neon)' },
+
+  // Override del KPI de cantidad de activos
+  overrideToggle: { display: 'inline-flex', alignItems: 'center', gap: 6, fontFamily: "'Roboto Mono',monospace", fontSize: 9, fontWeight: 700, letterSpacing: 1.5, color: 'var(--text-dim)', cursor: 'pointer', padding: '4px 8px', border: '1px solid var(--border)', borderRadius: 3, background: 'var(--input-bg)' },
+  overrideRow: { display: 'flex', gap: 10, marginBottom: 12, flexWrap: 'wrap', padding: '10px 12px', background: 'rgba(0,255,170,0.04)', border: '1px dashed rgba(0,255,170,0.25)', borderRadius: 4 },
 };

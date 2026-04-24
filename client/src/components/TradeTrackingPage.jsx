@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { createPortal } from 'react-dom';
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:3001';
 const DEFAULT_SETTLEMENT = 'A-24HS';
@@ -14,11 +15,23 @@ const BROKER_COLORS = ['#3b82f6', '#22c55e', '#f59e0b', '#ec4899', '#a855f7', '#
 const GREEN = '#22c55e';
 const RED = '#ef4444';
 
-// ── Comisiones institucionales D&G (fijas) ──
-// Compra: se le suma 0,785% al monto (aranceles + derechos de mercado + IVA).
-// Venta: se multiplica lo recibido por 0,99214 (equivalente a ~0,786% de costo de venta).
-const BUY_COMM_PCT = 0.785;
-const SELL_FACTOR = 0.99214;
+// ── Comisión operativa ──
+// Valor por defecto (0,6%) usado cuando el trade no tiene comisión propia seteada.
+// La comisión se guarda POR TRADE (columna `commission` en la tabla) y se aplica
+// EN LAS DOS PATAS:
+//   · Costo de compra por unidad: price × (1 + c)
+//   · Ingreso de venta por unidad: price × (1 − c)
+// Así el rendimiento neto absorbe 2× la comisión contra el bruto.
+const DEFAULT_COMM_PCT = 0.6;
+// Derecho de mercado ByMA 24H para soberanos/subsoberanos (valor por defecto).
+// Se aplica por trade en AMBAS patas, igual que la comisión:
+//   · Costo de compra: price × (1 + comm + drx)
+//   · Ingreso de venta: price × (1 − comm − drx)
+const DEFAULT_DRX_PCT = 0.01;
+// Devuelve la comisión % aplicable a un trade (su valor guardado o el default).
+const tradeComm = (t) => (t?.commission != null && !isNaN(Number(t.commission))) ? Number(t.commission) : DEFAULT_COMM_PCT;
+// Devuelve el derecho de mercado % aplicable a un trade.
+const tradeDrx  = (t) => (t?.market_fee != null && !isNaN(Number(t.market_fee))) ? Number(t.market_fee) : DEFAULT_DRX_PCT;
 
 function loadBrokers() {
   try {
@@ -195,7 +208,7 @@ export default function TradeTrackingPage({ marketData = {}, primaryConnected = 
             <div style={{ ...S.col, ...S.colActions }} />
           </div>
           {visibleTrades.map(t => {
-            const q = getQuote(t); const m = computeMetrics(t, q.price);
+            const q = getQuote(t); const m = computeMetrics(t, q.price, tradeComm(t), tradeDrx(t));
             const priceColor = q.price == null ? 'var(--text-dim)' : (q.price >= t.price ? GREEN : RED);
             const grossTotal = m ? m.grossRetAbs * t.quantity : null;
             const netTotal = m ? m.netRetAbs * t.quantity : null;
@@ -252,23 +265,25 @@ export default function TradeTrackingPage({ marketData = {}, primaryConnected = 
 // ══════════════════════════════════════════════
 //  METRICS
 // ══════════════════════════════════════════════
-function computeMetrics(t, currentPrice) {
+// `commPct` viene en porcentaje (ej. 0.6 = 0,6%). Se aplica por igual a compra y venta:
+//   invested = price × (1 + c);  sold = price × (1 − c)
+function computeMetrics(t, currentPrice, commPct = DEFAULT_COMM_PCT, drxPct = DEFAULT_DRX_PCT) {
   if (currentPrice == null || t.price == null) return null;
-  // Costo efectivo de compra por unidad: precio + 0,785%.
-  const investedPerUnit = t.price * (1 + BUY_COMM_PCT / 100);
-  // Monto efectivo recibido por unidad al vender: precio actual × 0,99214.
-  const sellPerUnit = currentPrice * SELL_FACTOR;
+  // fee = comm + drx, aplicado como una sola alícuota en cada punta.
+  const fee = ((commPct || 0) + (drxPct || 0)) / 100;
+  // Costo efectivo de compra por unidad: precio + fee%.
+  const investedPerUnit = t.price * (1 + fee);
+  // Monto efectivo recibido por unidad al vender: precio actual − fee%.
+  const sellPerUnit = currentPrice * (1 - fee);
 
   // Bruto: sin comisiones.
   const grossRetAbs = currentPrice - t.price;
   const grossRetPct = (grossRetAbs / t.price) * 100;
-  // Neto: incluye comisión de compra (+0,785%) y de venta (×0,99214).
+  // Neto: absorbe 2× comisión (una en cada pata).
   const netRetAbs = sellPerUnit - investedPerUnit;
   const netRetPct = (netRetAbs / investedPerUnit) * 100;
 
   const days = daysBetween(t.trade_date, new Date());
-  const grossAnnualized = days > 0 ? ((Math.pow(currentPrice / t.price, 365 / days) - 1) * 100) : null;
-  const netAnnualized = days > 0 && investedPerUnit > 0 ? ((Math.pow(sellPerUnit / investedPerUnit, 365 / days) - 1) * 100) : null;
 
   const tgtPrice = resolveTargetPrice(t);
   let targetRemPct = null;
@@ -276,11 +291,11 @@ function computeMetrics(t, currentPrice) {
   const stopHit = t.stop_loss != null && currentPrice <= t.stop_loss;
   const stopDistPct = t.stop_loss != null ? ((currentPrice - t.stop_loss) / currentPrice) * 100 : null;
 
-  // retAbs/retPct/annualized se mantienen como alias brutos para compatibilidad.
+  // retAbs/retPct se mantienen como alias brutos para compatibilidad.
   return {
-    retAbs: grossRetAbs, retPct: grossRetPct, annualized: grossAnnualized,
-    grossRetAbs, grossRetPct, grossAnnualized,
-    netRetAbs, netRetPct, netAnnualized,
+    retAbs: grossRetAbs, retPct: grossRetPct,
+    grossRetAbs, grossRetPct,
+    netRetAbs, netRetPct,
     days, targetRemPct, stopHit, stopDistPct, tgtPrice, investedPerUnit, sellPerUnit,
   };
 }
@@ -393,7 +408,8 @@ function TradeForm({ trade, onSave, onClose, editMode, brokers, addBroker, remov
     ticker: trade?.ticker || '',
     price: trade?.price ?? '',
     quantity: trade?.quantity ?? 100,
-    commission: trade?.commission ?? 0,
+    commission: trade?.commission ?? DEFAULT_COMM_PCT,
+    market_fee: trade?.market_fee ?? DEFAULT_DRX_PCT,
     target_type: trade?.target_type || 'price',
     target_value: trade?.target_value ?? '',
     stop_mode: 'price', // 'price' | 'pct' — input helper only, we always save stop_loss as absolute price
@@ -471,6 +487,7 @@ function TradeForm({ trade, onSave, onClose, editMode, brokers, addBroker, remov
       settlement: DEFAULT_SETTLEMENT, ticker: f.ticker.toUpperCase(),
       price: Number(f.price), quantity: Number(f.quantity),
       commission: f.commission === '' ? 0 : Number(f.commission),
+      market_fee: f.market_fee === '' ? 0 : Number(f.market_fee),
       target_type: f.target_type,
       target_value: f.target_value === '' ? null : Number(f.target_value),
       stop_loss: stopFinal,
@@ -546,11 +563,31 @@ function TradeForm({ trade, onSave, onClose, editMode, brokers, addBroker, remov
           <div style={S.formRow}>
             <F l="Precio entrada" req><input type="number" step="0.01" style={S.input} value={f.price} onChange={e => up('price', e.target.value)} placeholder="0.00" /></F>
             <F l="Cantidad (nominales)"><input type="number" step="1" style={S.input} value={f.quantity} onChange={e => up('quantity', e.target.value)} placeholder="100" /></F>
-            <F l="Comisión (institucional)">
-              <div style={{ ...S.input, display: 'flex', alignItems: 'center', justifyContent: 'space-between', color: 'var(--text-dim)', fontSize: 11, padding: '8px 10px' }}>
-                <span>Compra +{fmtN(BUY_COMM_PCT)}%</span>
-                <span>Venta ×{fmtN(SELL_FACTOR, 5)}</span>
+            <F l="Comisión % (por trade)">
+              <div style={{ position: 'relative' }}>
+                <input
+                  type="number" step="0.05" min="0" max="10"
+                  style={{ ...S.input, paddingRight: 24 }}
+                  value={f.commission}
+                  onChange={e => up('commission', e.target.value === '' ? '' : Math.max(0, Math.min(10, parseFloat(e.target.value) || 0)))}
+                  placeholder="0.60"
+                />
+                <span style={{ position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-dim)', fontFamily: "'Roboto Mono',monospace", fontSize: 11 }}>%</span>
               </div>
+              <div style={{ fontSize: 9, color: 'var(--text-dim)', marginTop: 3, fontFamily: "'Roboto Mono',monospace" }}>se aplica a la compra (+) y a la venta (−)</div>
+            </F>
+            <F l={<span style={{ display: 'inline-flex', alignItems: 'center' }}>Derecho de mercado %<DrxHelp /></span>}>
+              <div style={{ position: 'relative' }}>
+                <input
+                  type="number" step="0.001" min="0" max="1"
+                  style={{ ...S.input, paddingRight: 24 }}
+                  value={f.market_fee}
+                  onChange={e => up('market_fee', e.target.value === '' ? '' : Math.max(0, Math.min(1, parseFloat(e.target.value) || 0)))}
+                  placeholder="0.010"
+                />
+                <span style={{ position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-dim)', fontFamily: "'Roboto Mono',monospace", fontSize: 11 }}>%</span>
+              </div>
+              <div style={{ fontSize: 9, color: 'var(--text-dim)', marginTop: 3, fontFamily: "'Roboto Mono',monospace" }}>ByMA 24H · se suma a la comisión en ambas patas</div>
             </F>
           </div>
           <div style={S.formRow}>
@@ -603,15 +640,97 @@ function F({ l, req, children }) {
   );
 }
 
+// Tooltip con la tabla de derechos de mercado (ByMA) a 24H por tipo de activo.
+// El popup se renderiza vía portal a <body> con position: fixed para escapar
+// del overflow del modal padre. Sin portal, el modal se pone a hacer scroll
+// tratando de "acomodar" el tooltip y rompe el layout.
+function DrxHelp() {
+  const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState(null); // { top, left } en coords de viewport
+  const wrapRef = useRef(null);
+  const POP_W = 280;        // debe coincidir con helpPop.width
+  const POP_H_APROX = 240;  // alto estimado del popup (p/ decidir si va arriba o abajo)
+
+  const rows = [
+    { k: 'Soberanos (Públicos)',    v: '0,01 %',  hint: 'AL30, GD30, etc.' },
+    { k: 'Subsoberanos (Públicos)', v: '0,01 %',  hint: 'PBA, CABA, prov.' },
+    { k: 'Letras',                  v: '0,001 %', hint: 'LEDES, LECAPs' },
+    { k: 'ON (Corporativos)',       v: '0,08 %',  hint: 'Obligaciones negociables' },
+    { k: 'CEDEARs / Acciones',      v: '0,05 %',  hint: 'Privados (renta variable)' },
+  ];
+
+  // Al abrir, capturamos la posición del botón y decidimos:
+  //  - Horizontal: centrado si entra, sino pegamos al borde derecho/izquierdo
+  //    del viewport con un margen de 8px.
+  //  - Vertical: debajo del botón, pero si no hay espacio abajo lo mandamos
+  //    arriba.
+  const openWithPos = () => {
+    const rect = wrapRef.current?.getBoundingClientRect();
+    if (rect) {
+      const centered = rect.left + rect.width / 2 - POP_W / 2;
+      const left = Math.max(8, Math.min(centered, window.innerWidth - POP_W - 8));
+      const spaceBelow = window.innerHeight - rect.bottom;
+      const top = spaceBelow < POP_H_APROX + 12
+        ? Math.max(8, rect.top - POP_H_APROX - 8)
+        : rect.bottom + 8;
+      setPos({ top, left });
+    }
+    setOpen(true);
+  };
+  const close = () => setOpen(false);
+
+  return (
+    <span
+      ref={wrapRef}
+      style={S.helpWrap}
+      onMouseEnter={openWithPos}
+      onMouseLeave={close}
+      onFocus={openWithPos}
+      onBlur={close}
+      tabIndex={0}
+      aria-label="Ver tabla de derechos de mercado"
+    >
+      <span style={S.helpBtn}>?</span>
+      {open && pos && createPortal(
+        <div
+          style={{ ...S.helpPop, top: pos.top, left: pos.left }}
+          role="tooltip"
+        >
+          <div style={S.helpTitle}>DERECHOS DE MERCADO · PLAZO 24H</div>
+          <div style={S.helpTable}>
+            {rows.map((r, i) => (
+              <div key={i} style={S.helpRow}>
+                <div>
+                  <div style={S.helpK}>{r.k}</div>
+                  <div style={S.helpHint}>{r.hint}</div>
+                </div>
+                <div style={S.helpV}>{r.v}</div>
+              </div>
+            ))}
+          </div>
+          <div style={S.helpFoot}>
+            Alícuota aplicada sobre el monto efectivo de cada operación (compra o venta). Valores referenciales de ByMA — pueden variar en otros plazos (48h, 72h).
+          </div>
+        </div>,
+        document.body
+      )}
+    </span>
+  );
+}
+
 // ══════════════════════════════════════════════
 //  DETAIL
 // ══════════════════════════════════════════════
 function TradeDetail({ trade, quote, brokers, onClose, onFlyer }) {
-  const m = computeMetrics(trade, quote?.price);
+  const commPct = tradeComm(trade);
+  const drxPct  = tradeDrx(trade);
+  const feePct  = commPct + drxPct;
+  const m = computeMetrics(trade, quote?.price, commPct, drxPct);
   const priceColor = quote?.price == null ? 'var(--text-dim)' : (quote.price >= trade.price ? GREEN : RED);
   const grossTotal = m ? m.grossRetAbs * trade.quantity : null;
   const netTotal = m ? m.netRetAbs * trade.quantity : null;
-  const buyCommAmount = trade.price != null && trade.quantity != null ? (trade.price * trade.quantity * BUY_COMM_PCT / 100) : 0;
+  const buyCommAmount  = trade.price != null && trade.quantity != null ? (trade.price * trade.quantity * feePct / 100) : 0;
+  const sellCommAmount = quote?.price != null && trade.quantity != null ? (quote.price * trade.quantity * feePct / 100) : null;
   const totalOperado = trade.price != null && trade.quantity != null ? (trade.price * trade.quantity + buyCommAmount) : null;
   const tgtPrice = resolveTargetPrice(trade);
   useEffect(() => {
@@ -643,8 +762,8 @@ function TradeDetail({ trade, quote, brokers, onClose, onFlyer }) {
             <DR l="Precio entrada" v={`$${fmtN(trade.price)}`} />
             <DR l="Precio actual" v={quote?.price != null ? `$${fmtN(quote.price)}` : '...'} color={priceColor} />
             <DR l="Cantidad (nominales)" v={fmtN(trade.quantity, 0)} />
-            <DR l="Comisión compra" v={`${fmtN(BUY_COMM_PCT)}% ($${fmtN(buyCommAmount)})`} />
-            <DR l="Factor venta" v={`×${fmtN(SELL_FACTOR, 5)}`} />
+            <DR l="Comisión compra" v={`${fmtN(commPct)}% + ${fmtN(drxPct, 3)}% DRX ($${fmtN(buyCommAmount)})`} />
+            <DR l="Comisión venta"  v={sellCommAmount != null ? `${fmtN(commPct)}% + ${fmtN(drxPct, 3)}% DRX ($${fmtN(sellCommAmount)})` : `${fmtN(commPct)}% + ${fmtN(drxPct, 3)}% DRX`} />
             <DR l="Total operado (compra)" v={totalOperado != null ? `$${fmtN(totalOperado)}` : '—'} />
             <DR l="Objetivo" v={tgtPrice != null ? `$${fmtN(tgtPrice)}${trade.target_type === 'yield' ? ` (${fmtN(trade.target_value)}%)` : ''}` : '—'} color={tgtPrice != null ? GREEN : 'var(--text)'} />
             <DR l="Stop loss" v={trade.stop_loss != null ? `$${fmtN(trade.stop_loss)}` : '—'} color={trade.stop_loss != null ? RED : 'var(--text)'} />
@@ -659,8 +778,6 @@ function TradeDetail({ trade, quote, brokers, onClose, onFlyer }) {
                 <Metric l="Resultado bruto" v={`${grossTotal >= 0 ? '+' : ''}$${fmtN(grossTotal)}`} color={signColor(grossTotal)} />
                 <Metric l="Resultado neto" v={`${netTotal >= 0 ? '+' : ''}$${fmtN(netTotal)}`} color={signColor(netTotal)} />
                 <Metric l="Días" v={m.days} />
-                {m.grossAnnualized != null && <Metric l="TNA bruta" v={fmtPct(m.grossAnnualized)} color={signColor(m.grossAnnualized)} />}
-                {m.netAnnualized != null && <Metric l="TNA neta" v={fmtPct(m.netAnnualized)} color={signColor(m.netAnnualized)} />}
                 {m.targetRemPct != null && <Metric l="Falta al objetivo" v={fmtPct(m.targetRemPct)} color={m.targetRemPct > 0 ? 'var(--text)' : GREEN} />}
                 {m.stopDistPct != null && <Metric l="Dist. stop" v={fmtPct(m.stopDistPct)} color={m.stopDistPct > 5 ? 'var(--text)' : RED} />}
               </div>
@@ -700,6 +817,9 @@ function DR({ l, v, color }) {
 //  FLYER — single trade
 // ══════════════════════════════════════════════
 function TradeFlyer({ trade, quote, brokers, onClose }) {
+  const commPct = tradeComm(trade);
+  const drxPct  = tradeDrx(trade);
+  const feePct  = commPct + drxPct;
   const ref = useRef(null);
   const [dl, setDl] = useState(false);
   const [theme, setTheme] = useState(() => document.documentElement.getAttribute('data-theme') || 'dark');
@@ -715,10 +835,10 @@ function TradeFlyer({ trade, quote, brokers, onClose }) {
   }, [onClose]);
   const logoSrc = theme === 'dark' ? '/logos/DG%20tema%20oscuro.png' : '/logos/DG-tema-claro.svg';
 
-  const m = computeMetrics(trade, quote?.price);
+  const m = computeMetrics(trade, quote?.price, commPct, drxPct);
   const grossTotal = m ? m.grossRetAbs * trade.quantity : null;
   const netTotal = m ? m.netRetAbs * trade.quantity : null;
-  const buyCommAmount = trade.price != null && trade.quantity != null ? (trade.price * trade.quantity * BUY_COMM_PCT / 100) : 0;
+  const buyCommAmount = trade.price != null && trade.quantity != null ? (trade.price * trade.quantity * feePct / 100) : 0;
   const totalOperado = trade.price != null && trade.quantity != null ? (trade.price * trade.quantity + buyCommAmount) : null;
   const tgtPrice = resolveTargetPrice(trade);
 
@@ -871,6 +991,21 @@ const S = {
 
   formRow: { display: 'flex', gap: 12, marginBottom: 14, flexWrap: 'wrap' },
   formLabel: { display: 'block', fontSize: 9, fontWeight: 700, letterSpacing: 2, color: 'var(--text-dim)', marginBottom: 5, textTransform: 'uppercase' },
+
+  helpWrap: { position: 'relative', display: 'inline-flex', alignItems: 'center', marginLeft: 4, cursor: 'help', outline: 'none' },
+  helpBtn: { width: 14, height: 14, borderRadius: '50%', border: '1px solid var(--border)', background: 'var(--input-bg)', color: 'var(--text-dim)', fontFamily: "'Roboto Mono',monospace", fontSize: 9, fontWeight: 700, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', lineHeight: 1 },
+  // helpPop se renderiza via portal a <body>. position: fixed + top/left
+  // inyectados dinámicamente desde DrxHelp vía getBoundingClientRect(). Así
+  // el tooltip no hereda el overflow/scroll del modal padre y nunca lo rompe.
+  helpPop: { position: 'fixed', zIndex: 10050, width: 280, background: 'var(--bg-card)', border: '1px solid var(--border-neon)', borderRadius: 5, padding: '10px 12px', boxShadow: '0 6px 24px rgba(0,0,0,0.55)', pointerEvents: 'none' },
+  helpTitle: { fontFamily: "'Roboto',sans-serif", fontSize: 9, fontWeight: 700, letterSpacing: 2, color: 'var(--neon)', textTransform: 'uppercase', marginBottom: 8, textAlign: 'center' },
+  helpTable: { display: 'flex', flexDirection: 'column' },
+  helpRow: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', padding: '5px 0', borderBottom: '1px solid rgba(128,128,128,0.12)', gap: 10 },
+  helpK: { fontFamily: "'Roboto Mono',monospace", fontSize: 10, fontWeight: 700, color: 'var(--text)', letterSpacing: 0.3 },
+  helpHint: { fontFamily: "'Roboto Mono',monospace", fontSize: 8, color: 'var(--text-dim)', opacity: 0.7, marginTop: 1 },
+  helpV: { fontFamily: "'Roboto Mono',monospace", fontSize: 11, fontWeight: 700, color: 'var(--neon)', whiteSpace: 'nowrap' },
+  helpFoot: { fontFamily: "'Roboto Mono',monospace", fontSize: 8, color: 'var(--text-dim)', letterSpacing: 0.3, lineHeight: 1.4, opacity: 0.75, marginTop: 8, paddingTop: 6, borderTop: '1px solid rgba(128,128,128,0.15)' },
+
   input: { width: '100%', background: 'var(--input-bg)', border: '1px solid var(--border)', borderRadius: 3, color: 'var(--text)', fontFamily: "'Roboto Mono',monospace", fontSize: 12, padding: '8px 10px', outline: 'none', boxSizing: 'border-box' },
   brokerBtn: { background: 'transparent', border: '1.5px solid var(--border)', borderRadius: 3, fontFamily: "'Roboto Mono',monospace", fontSize: 11, fontWeight: 700, letterSpacing: 2, padding: '8px 12px', cursor: 'pointer', transition: 'all 0.15s' },
   toggleBtn: { flex: 1, padding: '8px 10px', background: 'transparent', border: '1px solid var(--border)', borderRadius: 3, color: 'var(--text-dim)', fontFamily: "'Roboto Mono',monospace", fontSize: 10, fontWeight: 700, letterSpacing: 1.5, cursor: 'pointer' },

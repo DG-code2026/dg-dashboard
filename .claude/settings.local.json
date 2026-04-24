@@ -25,7 +25,21 @@
       "Bash(npx --no-install esbuild --loader:.jsx=jsx --bundle=false --format=esm src/components/FondosPershing.jsx)",
       "Bash(npx --no-install esbuild --loader:.jsx=jsx --bundle=false --format=esm src/App.jsx)",
       "Bash(node --check index.js)",
-      "Bash(curl -s -o /dev/null -w \"GET %{http_code}\\\\n\" http://localhost:3001/api/db/fondos-pershing --max-time 3)"
+      "Bash(curl -s -o /dev/null -w \"GET %{http_code}\\\\n\" http://localhost:3001/api/db/fondos-pershing --max-time 3)",
+      "Bash(npx --no-install esbuild --loader:.jsx=jsx --bundle=false --format=esm src/components/TradeTrackingPage.jsx)",
+      "Bash(npx --no-install esbuild --loader:.jsx=jsx --bundle=false --format=esm src/components/CalculadoraRotaciones.jsx)",
+      "Bash(npx --no-install esbuild --loader:.jsx=jsx --bundle=false --format=esm src/components/HomePage.jsx)",
+      "Bash(npx --yes esbuild --loader:.jsx=jsx --bundle=false --format=esm client/src/components/CalculadoraRotaciones.jsx)",
+      "Bash(node -e \"require\\('fs'\\).readFileSync\\('server/index.js','utf8'\\); console.log\\('server/index.js: OK length', require\\('fs'\\).readFileSync\\('server/index.js','utf8'\\).length\\)\")",
+      "Bash(npx --yes esbuild --bundle=false --loader:.jsx=jsx --log-level=error src/components/CalculadoraRotaciones.jsx)",
+      "Bash(npx --yes esbuild --bundle=false --loader:.jsx=jsx --log-level=error src/components/BondPage.jsx)",
+      "Bash(node -e \"require\\('@babel/parser'\\).parse\\(require\\('fs'\\).readFileSync\\('src/components/HomePage.jsx','utf8'\\),{sourceType:'module',plugins:['jsx']}\\); console.log\\('HomePage OK'\\)\")",
+      "Bash(node -e \"require\\('@babel/parser'\\).parse\\(require\\('fs'\\).readFileSync\\('index.js','utf8'\\),{sourceType:'module'}\\); console.log\\('server/index.js OK'\\)\")",
+      "Bash(node -e \"const p=require\\('@babel/parser'\\);const fs=require\\('fs'\\);const src=fs.readFileSync\\('src/components/CarterasPage.jsx','utf8'\\);try{p.parse\\(src,{sourceType:'module',plugins:['jsx']}\\);console.log\\('OK'\\);}catch\\(e\\){console.log\\('FAIL',e.message\\);}\")",
+      "Bash(node -e \"const p=require\\('@babel/parser'\\);const fs=require\\('fs'\\);for \\(const f of ['src/components/CarterasPage.jsx','src/components/DollarRates.jsx','src/components/FxCalculator.jsx']\\){try{p.parse\\(fs.readFileSync\\(f,'utf8'\\),{sourceType:'module',plugins:['jsx']}\\);console.log\\('OK',f\\);}catch\\(e\\){console.log\\('FAIL',f,e.message\\);}}\")",
+      "WebFetch(domain:bolsar.info)",
+      "Bash(curl -sL \"https://bolsar.info/calendario.php\" -o \"C:\\\\Users\\\\Florencia\\\\Desktop\\\\primary-dashboard \\(3\\)\\\\primary-dashboard\\\\_bolsar_calendar.html\")",
+      "Bash(curl -sL \"https://calendar.google.com/calendar/ical/22d993bb43ba85c1611ae5d81c6de27dbd0c4904725e417d80db4b77d46ff302%40group.calendar.google.com/public/basic.ics\" -o \"C:\\\\Users\\\\Florencia\\\\Desktop\\\\primary-dashboard \\(3\\)\\\\primary-dashboard\\\\_bolsar_cal.ics\")"
     ]
   }
 }

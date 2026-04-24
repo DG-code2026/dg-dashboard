@@ -109,11 +109,19 @@ app.get('/api/db/carteras/:id', async (req, res) => {
 });
 
 // Create cartera
+// Sólo mandamos a Supabase las columnas que vienen en el body — si la tabla
+// no tiene `descripcion` (u otra columna opcional), no forzamos el insert.
 app.post('/api/db/carteras', async (req, res) => {
   try {
     const { nombre, descripcion } = req.body;
     if (!nombre) return res.status(400).json({ error: 'nombre required' });
-    const r = await supa('/carteras', { method: 'POST', body: { nombre, descripcion: descripcion || '' } });
+    const body = { nombre };
+    if (descripcion != null && descripcion !== '') body.descripcion = descripcion;
+    const r = await supa('/carteras', { method: 'POST', body });
+    // Si Supabase devolvió string (error en texto plano) o un objeto con `message`/`code`,
+    // lo surfaceamos para que el cliente pueda mostrarlo.
+    if (typeof r === 'string') return res.status(500).json({ error: r });
+    if (r && !Array.isArray(r) && (r.message || r.code)) return res.status(500).json({ error: r.message || r.code, detail: r });
     res.json(Array.isArray(r) ? r[0] : r);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -192,6 +200,7 @@ app.post('/api/db/trades', async (req, res) => {
       target_value: body.target_value != null ? Number(body.target_value) : null,
       stop_loss: body.stop_loss != null ? Number(body.stop_loss) : null,
       commission: body.commission != null ? Number(body.commission) : 0,
+      market_fee: body.market_fee != null ? Number(body.market_fee) : 0.01,
       notes: body.notes || '',
     };
     const r = await supa('/trades', { method: 'POST', body: row });
@@ -234,6 +243,12 @@ app.post('/api/db/propuestas', async (req, res) => {
       items: Array.isArray(body.items) ? body.items : [],
       notes: body.notes || '',
     };
+    // Overrides de display opcionales. Sólo los propagamos si el cliente los mandó
+    // — si la tabla Supabase no tiene la columna, no forzamos el insert. Igual la
+    // UI sigue funcionando en sesión; la persistencia se añade cuando se sume la columna.
+    if (body.override_count_enabled != null) row.override_count_enabled = !!body.override_count_enabled;
+    if (body.override_count_label != null) row.override_count_label = body.override_count_label;
+    if (body.override_count_value != null) row.override_count_value = body.override_count_value;
     const r = await supa('/propuestas', { method: 'POST', body: row });
     res.json(Array.isArray(r) ? r[0] : r);
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -410,6 +425,127 @@ app.post('/api/ppi/bonds/batch', async (req, res) => {
 app.post('/api/ppi/cache/clear', (req, res) => { ppiCache.clear(); res.json({ ok: true }); });
 
 app.get('/api/ppi/status', async (req, res) => { res.json({ authenticated: !!ppiToken, tokenExpired: ppiExpired(), supabase: !!SUPA_URL }); });
+
+// ══════════════════════════════════════════════
+//  BOLSAR · Calendario Bursátil
+//
+//  bolsar.info/calendario.php embebe el Calendario Bursátil como iframe de
+//  Google Calendar. El ID del calendario (base64 en el src del iframe)
+//  decodificado es:
+//    22d993bb43ba85c1611ae5d81c6de27dbd0c4904725e417d80db4b77d46ff302
+//      @group.calendar.google.com
+//
+//  El feed público ICS no requiere API key. Cacheamos 6h en memoria para no
+//  martillar al calendar de Google (el ICS pesa ~1MB). El endpoint acepta
+//  ?from=YYYY-MM-DD&to=YYYY-MM-DD para filtrar (opcional).
+//
+//  Respuesta: [{ date, kind, tickers[], raw }]
+//    kind ∈ 'amortizacion' | 'renta' | 'dividendo' | 'feriado' | 'otro'
+// ══════════════════════════════════════════════
+const BOLSAR_CAL_ID = '22d993bb43ba85c1611ae5d81c6de27dbd0c4904725e417d80db4b77d46ff302@group.calendar.google.com';
+const BOLSAR_CAL_URL = `https://calendar.google.com/calendar/ical/${encodeURIComponent(BOLSAR_CAL_ID)}/public/basic.ics`;
+const BOLSAR_TTL = 6 * 60 * 60 * 1000; // 6h
+let bolsarCache = { fetchedAt: 0, events: null };
+
+// Desescapa valores ICS: `\,` → `,`, `\;` → `;`, `\n` → LF, `\\` → `\`.
+function unescapeICS(s) {
+  return String(s).replace(/\\n/gi, '\n').replace(/\\([,;\\])/g, '$1');
+}
+
+// Parser mínimo de VEVENTs. El ICS envuelve líneas largas con `\r\n ` (folding).
+function parseICS(text) {
+  // Unfold líneas: CRLF + espacio/tab continúa la línea previa.
+  const unfolded = text.replace(/\r?\n[ \t]/g, '');
+  const lines = unfolded.split(/\r?\n/);
+  const events = [];
+  let cur = null;
+  for (const line of lines) {
+    if (line === 'BEGIN:VEVENT') cur = {};
+    else if (line === 'END:VEVENT') { if (cur) events.push(cur); cur = null; }
+    else if (cur) {
+      // clave con params: e.g. DTSTART;VALUE=DATE:20251225
+      const idx = line.indexOf(':');
+      if (idx < 0) continue;
+      const rawKey = line.slice(0, idx);
+      const value = line.slice(idx + 1);
+      const key = rawKey.split(';')[0].toUpperCase();
+      if (key === 'DTSTART' || key === 'DTEND') {
+        // Formato: YYYYMMDD o YYYYMMDDTHHMMSSZ
+        const m = value.match(/^(\d{4})(\d{2})(\d{2})/);
+        cur[key] = m ? `${m[1]}-${m[2]}-${m[3]}` : value;
+      } else if (key === 'SUMMARY') {
+        cur.SUMMARY = unescapeICS(value);
+      }
+    }
+  }
+  return events;
+}
+
+// Clasifica un SUMMARY y extrae tickers. Separadores observados: `;` (luego
+// del unescape) y `,`. Algunos summaries vienen con espacios dobles.
+function classifySummary(summary) {
+  const s = String(summary || '').trim();
+  const lower = s.toLowerCase();
+
+  if (lower.startsWith('feriado')) return { kind: 'feriado', tickers: [], label: s };
+  if (lower.includes('vencimiento')) return { kind: 'vencimiento', tickers: [], label: s };
+
+  // Detecta tipo de pago.
+  let kind = 'otro';
+  if (/amortizaci[oó]n/i.test(s))     kind = 'amortizacion';
+  else if (/renta/i.test(s))          kind = 'renta';
+  else if (/dividendo/i.test(s))      kind = 'dividendo';
+
+  // Extrae la parte después del separador (– / - / :).
+  const sep = s.search(/[–\-:]/);
+  const tail = sep >= 0 ? s.slice(sep + 1) : '';
+  const tickers = tail
+    .split(/[;,]/)
+    .map(t => t.trim().toUpperCase())
+    .filter(t => t && /^[A-Z0-9.]+$/.test(t) && t.length <= 10);
+
+  return { kind, tickers, label: s };
+}
+
+async function fetchBolsarICS() {
+  // Caché en memoria.
+  if (bolsarCache.events && Date.now() - bolsarCache.fetchedAt < BOLSAR_TTL) {
+    return bolsarCache.events;
+  }
+  const res = await fetch(BOLSAR_CAL_URL);
+  if (!res.ok) throw new Error(`Bolsar ICS ${res.status}`);
+  const text = await res.text();
+  const raw = parseICS(text);
+  const out = [];
+  for (const ev of raw) {
+    const date = ev.DTSTART;
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
+    const { kind, tickers, label } = classifySummary(ev.SUMMARY);
+    // Para feriados sin tickers, emitimos un evento con `tickers: []`.
+    // Para pagos sin tickers parseados, emitimos igual (fallback al label).
+    out.push({ date, kind, tickers, label });
+  }
+  bolsarCache = { fetchedAt: Date.now(), events: out };
+  return out;
+}
+
+app.get('/api/bolsar/calendar', async (req, res) => {
+  try {
+    const events = await fetchBolsarICS();
+    const from = req.query.from;
+    const to = req.query.to;
+    const filtered = events.filter(e => {
+      if (from && e.date < from) return false;
+      if (to   && e.date > to)   return false;
+      return true;
+    });
+    res.json({ events: filtered, fetchedAt: bolsarCache.fetchedAt });
+  } catch (e) {
+    res.status(500).json({ error: e.message, events: [] });
+  }
+});
+
+app.post('/api/bolsar/cache/clear', (req, res) => { bolsarCache = { fetchedAt: 0, events: null }; res.json({ ok: true }); });
 
 // ══════════════════════════════════════════════
 //  PPI · SearchInstrument (fuente única de identidad)

@@ -127,11 +127,9 @@ export default function FxCalculator({ rates, commission, onClose }) {
             </div>
             <div style={S.rateRow}>
               <span style={S.rateLabel}>Comisión aplicada</span>
-              <span style={S.rateValue}>
-                {pair === 'canje'
-                  ? `${((commission / 2) * 100).toFixed(3)}% c/punta`
-                  : `${(commission * 100).toFixed(3)}% c/punta`}
-              </span>
+              {/* Desde que unificamos el criterio, todas las operaciones
+                  (MEP/CCL/CANJE) aplican la misma comisión en cada punta. */}
+              <span style={S.rateValue}>{`${(commission * 100).toFixed(3)}% c/punta`}</span>
             </div>
           </div>
         </div>
