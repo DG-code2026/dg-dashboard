@@ -9,6 +9,7 @@ import BonosSubsoberanos from './components/BonosSubsoberanos';
 import CarterasPage from './components/CarterasPage';
 import TradeTrackingPage from './components/TradeTrackingPage';
 import PropuestasPage from './components/PropuestasPage';
+import CartasPage from './components/CartasPage';
 import FondosPershing from './components/FondosPershing';
 import HomePage from './components/HomePage';
 import CalculadoraRotaciones from './components/CalculadoraRotaciones';
@@ -26,6 +27,7 @@ const TABS = [
   { id: 'trades', label: 'TRADE TRACKING', group: 'Herramientas' },
   { id: 'cart', label: 'CARTERAS', group: 'Gestión' },
   { id: 'prop', label: 'PROPUESTAS', group: 'Gestión' },
+  { id: 'cartas', label: 'CARTAS', group: 'Gestión' },
   { id: 'pershing', label: 'FONDOS PERSHING', group: 'Gestión' },
 ];
 
@@ -144,6 +146,8 @@ export default function App() {
       {activeTab === 'trades' && <section><SH title="TRADE TRACKING" /><p style={st.sectionSub}>Seguimiento de operaciones con cotización en tiempo real · WebSocket Primary · A-24HS</p><TradeTrackingPage marketData={data} primaryConnected={primaryConnected} /></section>}
 
       {activeTab === 'prop' && <section><SH title="PROPUESTAS DE INVERSIÓN" /><p style={st.sectionSub}>Armado de carteras y flyer institucional</p><PropuestasPage /></section>}
+
+      {activeTab === 'cartas' && <section><SH title="CARTAS" /><CartasPage /></section>}
 
       {activeTab === 'pershing' && <section><SH title="FONDOS PERSHING" /><p style={st.sectionSub}>Listado de fondos disponibles · ISIN copiable · filtros por nombre y casa</p><FondosPershing /></section>}
 

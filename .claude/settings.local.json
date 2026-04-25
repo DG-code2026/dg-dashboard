@@ -39,7 +39,11 @@
       "Bash(node -e \"const p=require\\('@babel/parser'\\);const fs=require\\('fs'\\);for \\(const f of ['src/components/CarterasPage.jsx','src/components/DollarRates.jsx','src/components/FxCalculator.jsx']\\){try{p.parse\\(fs.readFileSync\\(f,'utf8'\\),{sourceType:'module',plugins:['jsx']}\\);console.log\\('OK',f\\);}catch\\(e\\){console.log\\('FAIL',f,e.message\\);}}\")",
       "WebFetch(domain:bolsar.info)",
       "Bash(curl -sL \"https://bolsar.info/calendario.php\" -o \"C:\\\\Users\\\\Florencia\\\\Desktop\\\\primary-dashboard \\(3\\)\\\\primary-dashboard\\\\_bolsar_calendar.html\")",
-      "Bash(curl -sL \"https://calendar.google.com/calendar/ical/22d993bb43ba85c1611ae5d81c6de27dbd0c4904725e417d80db4b77d46ff302%40group.calendar.google.com/public/basic.ics\" -o \"C:\\\\Users\\\\Florencia\\\\Desktop\\\\primary-dashboard \\(3\\)\\\\primary-dashboard\\\\_bolsar_cal.ics\")"
+      "Bash(curl -sL \"https://calendar.google.com/calendar/ical/22d993bb43ba85c1611ae5d81c6de27dbd0c4904725e417d80db4b77d46ff302%40group.calendar.google.com/public/basic.ics\" -o \"C:\\\\Users\\\\Florencia\\\\Desktop\\\\primary-dashboard \\(3\\)\\\\primary-dashboard\\\\_bolsar_cal.ics\")",
+      "Bash(powershell -Command \"Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::ExtractToDirectory\\('TRF. PSH a PPI.docx', 'TRF_PSH_extracted'\\)\")",
+      "Bash(npm install *)",
+      "Bash(mkdir -p \"/c/Users/Florencia/Downloads/TRF_BCO_extracted\")",
+      "Bash(unzip -o \"/c/Users/Florencia/Downloads/TRF. PSH a Banco Internacional \\(1\\).docx\")"
     ]
   }
 }
