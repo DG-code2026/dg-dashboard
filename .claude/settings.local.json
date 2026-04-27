@@ -43,7 +43,20 @@
       "Bash(powershell -Command \"Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::ExtractToDirectory\\('TRF. PSH a PPI.docx', 'TRF_PSH_extracted'\\)\")",
       "Bash(npm install *)",
       "Bash(mkdir -p \"/c/Users/Florencia/Downloads/TRF_BCO_extracted\")",
-      "Bash(unzip -o \"/c/Users/Florencia/Downloads/TRF. PSH a Banco Internacional \\(1\\).docx\")"
+      "Bash(unzip -o \"/c/Users/Florencia/Downloads/TRF. PSH a Banco Internacional \\(1\\).docx\")",
+      "Bash(npm run *)",
+      "Bash(timeout 5 node server/index.js)",
+      "Bash(PORT=3099 timeout 4 node server/index.js)",
+      "Bash(cat vite.config.js)",
+      "Bash(cat vite.config.ts)",
+      "Bash(cat vite.config.mjs)",
+      "Bash(curl -s \"http://localhost:3001/api/ppi/bonds/estimate?ticker=PLC2D&type=BONOS_PUBLICOS&settlement=A-24HS&quantity=100\")",
+      "Bash(curl -s -X POST \"http://localhost:3001/api/ppi/bonds/batch?type=BONOS_PUBLICOS&settlement=A-24HS\" -H \"Content-Type: application/json\" -d '{\"tickers\":[\"PLC2D\"]}')",
+      "Bash(curl -s \"http://localhost:3001/api/ppi/asset/info?ticker=PLC2D&type=BONOS_PUBLICOS\")",
+      "Bash(curl -s \"http://localhost:3001/api/ppi/asset/info?ticker=PLC2D&type=ON\")",
+      "Bash(curl -s \"http://localhost:3001/api/ppi/market-data/current?ticker=PLC2D&type=ON&settlement=A-24HS\")",
+      "Bash(curl -s -X POST \"http://localhost:3001/api/ppi/bonds/batch?type=ON&settlement=A-24HS\" -H \"Content-Type: application/json\" -d '{\"tickers\":[\"PLC2D\"]}')",
+      "Bash(python3 -c ' *)"
     ]
   }
 }

@@ -330,6 +330,148 @@ async function buildTrfPshBancoPdf({
   return await doc.save();
 }
 
+// ══════════════════════════════════════════════
+//  PDF BUILDER · TRF Pershing → Pershing (entre cuentas)
+//
+//  Layout simple del docx (sin columnas):
+//    Buenos Aires, (fecha)
+//
+//    PERSHING LLC
+//    1st Pershing Plaza
+//    Jersey City, New Jersey
+//    07399 United States of America
+//    Ref. Account: (cuenta origen)
+//
+//    To whom it may concern,
+//
+//    Please, transfer from my account N° (origen), the amount of USD (monto)
+//    according to the following instructions:
+//
+//    Beneficiary Bank:
+//    The Bank of New York (New York, NY) (One Wall Street, New York, NY 10286)
+//    ABA o Routing Nbr: 021000018
+//
+//    Final Beneficiary:
+//    Pershing LLC (One Pershing Plaza, Jersey City, NJ 07399) Account: 8900512385
+//
+//    Reference: (cuenta receptora)
+//    FFC: (cuenta receptora) - (nombre receptora)
+//
+//    Best regards,
+//
+//  Todo el bloque "Beneficiary Bank / Final Beneficiary / Reference / FFC" va
+//  en negrita, replicando el .docx original.
+// ══════════════════════════════════════════════
+
+async function buildTrfPshEntreCuentasPdf({
+  fecha, cuentaOrigen, monto, cuentaReceptora, nombreReceptora,
+}) {
+  const doc = await PDFDocument.create();
+  const page = doc.addPage([595.28, 841.89]);
+  const { width, height } = page.getSize();
+
+  const reg  = await doc.embedFont(StandardFonts.Helvetica);
+  const bold = await doc.embedFont(StandardFonts.HelveticaBold);
+
+  const FS = 11;
+  const LH = 15;
+  const ML = 70;
+  const MR = 70;
+  const MT = 70;
+  // Right edge donde alineamos las líneas right-aligned (Buenos Aires / Ref. Account).
+  const RIGHT_EDGE = width - MR;
+  // Indent del bloque banco — el .docx usa w:left=546 (twentieths of a point)
+  // = 27.3pt, replicado tal cual para que "Beneficiary Bank/Final Beneficiary/
+  // Reference/FFC" queden tabuladas respecto a la dirección.
+  const INDENT = 27.3;
+  const xIndent = ML + INDENT;
+  // Ancho disponible cuando el .docx fuerza un right-margin extra (w:right=360
+  // → 18pt; w:right=2033 → ~101.6pt) que provoca el wrap de "ABA o Routing
+  // Nbr: 021000018" y de "Account: 8900512385" a una segunda línea.
+  const maxW       = width - ML - MR;
+  const maxWBank   = width - xIndent - MR - 18;     // wrap de "ABA o Routing Nbr…"
+  const maxWFinal  = width - xIndent - MR - 101.6;  // wrap de "Account: 8900512385"
+
+  let y = height - MT;
+
+  // "Buenos Aires, <fecha>" — etiqueta regular + fecha bold, right-aligned.
+  {
+    const labelW = reg.widthOfTextAtSize('Buenos Aires, ', FS);
+    const valueW = bold.widthOfTextAtSize(fmtFecha(fecha), FS);
+    const x = RIGHT_EDGE - (labelW + valueW);
+    page.drawText('Buenos Aires, ', { x, y, size: FS, font: reg });
+    page.drawText(fmtFecha(fecha), { x: x + labelW, y, size: FS, font: bold });
+  }
+  y -= LH * 2;
+
+  // Dirección Pershing — left-aligned al margen normal.
+  for (const line of [
+    'PERSHING LLC',
+    '1st Pershing Plaza',
+    'Jersey City, New Jersey',
+    '07399 United States of America',
+  ]) {
+    page.drawText(line, { x: ML, y, size: FS, font: reg });
+    y -= LH;
+  }
+
+  // "Ref. Account: <cuenta>" — right-aligned (igual que "Buenos Aires").
+  {
+    const labelW = reg.widthOfTextAtSize('Ref. Account: ', FS);
+    const valueW = bold.widthOfTextAtSize(cuentaOrigen, FS);
+    const x = RIGHT_EDGE - (labelW + valueW);
+    page.drawText('Ref. Account: ', { x, y, size: FS, font: reg });
+    page.drawText(cuentaOrigen, { x: x + labelW, y, size: FS, font: bold });
+  }
+  y -= LH * 2;
+
+  // Saludo.
+  page.drawText('To whom it may concern,', { x: ML, y, size: FS, font: reg });
+  y -= LH * 1.6;
+
+  // Body con runs mezclados — al margen normal, ancho completo.
+  y = drawWrappedRuns(page, [
+    { text: 'Please, transfer from my account N° ',          font: reg  },
+    { text: cuentaOrigen,                                     font: bold },
+    { text: ', the amount of USD ',                           font: reg  },
+    { text: fmtMonto(monto),                                  font: bold },
+    { text: ' according to the following instructions:',      font: reg  },
+  ], ML, y, maxW, FS, LH);
+  y -= LH;
+
+  // Beneficiary Bank (header + datos, indentados, bold).
+  page.drawText('Beneficiary Bank:', { x: xIndent, y, size: FS, font: bold });
+  y -= LH;
+  y = drawWrappedRuns(page, [
+    { text: 'The Bank of New York (New York, NY) (One Wall Street, New York, NY 10286) ABA o Routing Nbr: 021000018', font: bold },
+  ], xIndent, y, maxWBank, FS, LH);
+  y -= LH;
+
+  // Final Beneficiary — indent + right-margin extra que fuerza wrap de "Account: ...".
+  page.drawText('Final Beneficiary:', { x: xIndent, y, size: FS, font: bold });
+  y -= LH;
+  y = drawWrappedRuns(page, [
+    { text: 'Pershing LLC (One Pershing Plaza, Jersey City, NJ 07399) Account: 8900512385', font: bold },
+  ], xIndent, y, maxWFinal, FS, LH);
+  y -= LH;
+
+  // Reference + FFC, indentados, bold completo.
+  drawRunsLine(page, [
+    { text: 'Reference: ',  font: bold },
+    { text: cuentaReceptora, font: bold },
+  ], xIndent, y, FS);
+  y -= LH;
+  y = drawWrappedRuns(page, [
+    { text: 'FFC: ',                                  font: bold },
+    { text: `${cuentaReceptora} - ${nombreReceptora}`, font: bold },
+  ], xIndent, y, maxW - INDENT, FS, LH);
+
+  y -= LH * 2;
+  page.drawText('Best regards,', { x: ML, y, size: FS, font: reg });
+
+  return await doc.save();
+}
+
 // ── Dibuja una línea con runs sin word-wrap. Asume que entra. ──
 function drawRunsLine(page, runs, x, y, size) {
   let cursor = x;
@@ -465,6 +607,24 @@ const CARTA_TYPES = [
     buildPDF: buildTrfPshBancoPdf,
     buildFilename: ({ pshAccount }) =>
       `Transferencia_PSH-Banco_${sanitizeForFilename(pshAccount) || 'sin-cuenta'}.pdf`,
+  },
+  {
+    id: 'trf-psh-entre-cuentas',
+    label: 'Transferencia entre cuentas Pershing',
+    description: 'Carta de orden de transferencia entre dos cuentas Pershing (BNY Mellon como banco beneficiario).',
+    icon: '⇄',
+    templateUrl: '/templates/TRF_PSH_entre_cuentas.docx',
+    fields: [
+      { key: 'fecha',            label: 'Fecha',                        type: 'date', required: true, defaultValue: () => todayIso() },
+      { key: 'cuentaOrigen',     label: 'Número de cuenta de origen',   type: 'text', required: true, placeholder: 'Ej: ABC-123456' },
+      { key: 'monto',            label: 'Monto a transferir (USD)',     type: 'text', inputMode: 'decimal', required: true,
+        placeholder: 'Ej: 100000,00', helper: 'Se renderiza en el PDF como "USD 100.000,00"' },
+      { key: 'cuentaReceptora',  label: 'Número de cuenta receptora',   type: 'text', required: true, placeholder: 'Ej: XYZ-987654' },
+      { key: 'nombreReceptora',  label: 'Nombre de cuenta receptora',   type: 'text', required: true, placeholder: 'Ej: Juan Pérez' },
+    ],
+    buildPDF: buildTrfPshEntreCuentasPdf,
+    buildFilename: ({ cuentaOrigen }) =>
+      `Transferencia_PSH-PSH_${sanitizeForFilename(cuentaOrigen) || 'sin-cuenta'}.pdf`,
   },
 ];
 

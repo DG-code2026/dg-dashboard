@@ -11,7 +11,7 @@ const MONTH_LABELS = ['EN','FEB','MAR','ABR','MAY','JUN','JUL','AGO','SEP','OCT'
 
 function loadJSON(k,fb){try{return JSON.parse(localStorage.getItem(k))||fb;}catch{return fb;}}
 function saveJSON(k,v){try{localStorage.setItem(k,JSON.stringify(v));}catch{}}
-function extractMonths(flows){if(!flows?.length)return'—';const m=new Set();for(const f of flows){if(!f.rent||f.rent<=0)continue;const d=new Date(f.cuttingDate);if(!isNaN(d))m.add(d.getMonth());}return m.size?[...m].sort((a,b)=>a-b).map(i=>MONTH_LABELS[i]).join(' - '):'—';}
+function extractMonths(flows){if(!flows?.length)return'—';const now=new Date();const m=new Set();for(const f of flows){if(!f.rent||f.rent<=0)continue;const d=new Date(f.cuttingDate);if(isNaN(d)||d<=now)continue;m.add(d.getMonth());}return m.size?[...m].sort((a,b)=>a-b).map(i=>MONTH_LABELS[i]).join(' - '):'—';}
 function extractCoupon(s){if(!s)return'—';const m=s.match(/([\d.,]+\s*%)/);return m?m[1].trim():s;}
 function tirBg(tir,min,max){if(tir==null||min===max)return'transparent';const t=Math.max(0,Math.min(1,(tir-min)/(max-min)));return`rgba(${Math.round(255-t*199)},255,${Math.round(255-t*235)},${(0.12+t*0.35).toFixed(2)})`;}
 function copyText(t){navigator.clipboard?.writeText(t).catch(()=>{});}
@@ -19,7 +19,7 @@ async function loadH2C(){if(window.html2canvas)return window.html2canvas;return 
 
 const DETAIL_LABELS={tir:'TIR',md:'Modified Duration',issuer:'Emisor',issueCurrency:'Moneda de emisión',amortization:'Amortización',interests:'Intereses',issueDate:'Fecha de emisión',expirationDate:'Fecha de vencimiento',law:'Ley aplicable',minimalSheet:'Lámina mínima',isin:'ISIN'};
 const DETAIL_FIELDS=Object.keys(DETAIL_LABELS);
-function fmtD(k,v){if(v==null||v==='')return'—';if(k==='tir')return`${(v*100).toFixed(2)}%`;if(k==='md')return typeof v==='number'?v.toFixed(4):v;return String(v);}
+function fmtD(k,v){if(v==null||v==='')return'—';if(k==='tir')return`${(v*100).toFixed(1)}%`;if(k==='md')return typeof v==='number'?v.toFixed(1):v;return String(v);}
 
 function FlyerModal({data,columns,tirMin,tirMax,lastUpdate,onClose,title}){
   const[visCols,setVisCols]=useState(()=>columns.map(c=>c.key));const ref=useRef(null);const[dl,setDl]=useState(false);
@@ -56,8 +56,8 @@ export default function BondPage({ config }) {
       law:{label:'LEY',defW:65,fmt:v=>v||'—',editable:true},
       minimalSheet:{label:'Lámina',defW:82,fmt:v=>v||'—'},
       isin:{label:'ISIN',defW:140,fmt:v=>v||'—',copyable:true},
-      tir:{label:'TIR',defW:78,fmt:v=>v!=null?`${(v*100).toFixed(2)}%`:'—',isTir:true},
-      md:{label:'MD',defW:60,fmt:v=>v!=null?Number(v).toFixed(2):'—',dynamic:true},
+      tir:{label:'TIR',defW:78,fmt:v=>v!=null?`${(v*100).toFixed(1)}%`:'—',isTir:true},
+      md:{label:'MD',defW:60,fmt:v=>v!=null?Number(v).toFixed(1):'—',dynamic:true},
     });
     return cols;
   }, [showPaymentMonths]);
@@ -130,7 +130,7 @@ export default function BondPage({ config }) {
   return(
     <div>
       <style>{`.rf-th:hover .rf-resize{opacity:1;background:var(--neon-dim);}.rf-resize:hover{background:var(--neon)!important;}`}</style>
-      {modalBond&&<BondDetailModal bond={modalBond} ticker={modalTicker} price={modalPrice} manualLaw={modalLaw} onClose={()=>setModalBond(null)}/>}
+      {modalBond&&<BondDetailModal bond={modalBond} ticker={modalTicker} price={modalPrice} manualLaw={modalLaw} assetType={apiType} onClose={()=>setModalBond(null)}/>}
       {carteraPopup&&<AddToCarteraPopup ticker={carteraPopup.ticker} precio={carteraPopup.precio} tipo={apiType} settlement={settlement} laminaMinima={carteraPopup.laminaMinima} onClose={()=>setCarteraPopup(null)}/>}
       {showFlyer&&<FlyerModal data={flyerSel.size?processedData.filter(r=>flyerSel.has(r.ticker)):processedData} columns={columns} tirMin={tirMin} tirMax={tirMax} lastUpdate={favLastUpdate} onClose={()=>setShowFlyer(false)} title={flyerTitle}/>}
 

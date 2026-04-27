@@ -1,11 +1,84 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import FxCalculator from './FxCalculator';
 import SharePriceModal from './SharePriceModal';
+
+// ── Hook: estado del mercado (BYMA — abierto / cerrado) ──
+//
+// Pollea /api/market/status cada 60s para que el badge "MERCADO CERRADO"
+// aparezca/desaparezca cerca de los bordes (10:25 y 17:05 hora AR) sin tener
+// que recargar la página.
+function useMarketStatus(intervalMs = 60_000) {
+  const [status, setStatus] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      try {
+        const r = await fetch('/api/market/status');
+        if (!r.ok) return;
+        const j = await r.json();
+        if (!cancelled) setStatus(j);
+      } catch {/* silencioso */}
+    }
+    load();
+    const id = setInterval(() => {
+      if (document.visibilityState === 'visible') load();
+    }, intervalMs);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [intervalMs]);
+  return status;
+}
+
+// ── Hook: dólar oficial (BNA vía DolarAPI, fallback Bluelytics) ──
+//
+// Cada 60s pide /api/fx/oficial. El backend ya cachea 30s en memoria, así que
+// el costo real de un refresh frecuente es bajo. Pausamos cuando la pestaña
+// está en background para no quemar requests al pedo.
+function useDolarOficial(intervalMs = 60_000) {
+  const [oficial, setOficial] = useState(null); // { compra, venta, fechaActualizacion, source, stale }
+  const [error, setError] = useState(null);
+  const timerRef = useRef(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function load() {
+      try {
+        const r = await fetch('/api/fx/oficial');
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const json = await r.json();
+        if (!cancelled) {
+          setOficial(json);
+          setError(null);
+        }
+      } catch (e) {
+        if (!cancelled) setError(e.message);
+      }
+    }
+
+    load();
+    timerRef.current = setInterval(() => {
+      if (document.visibilityState === 'visible') load();
+    }, intervalMs);
+
+    const onVis = () => { if (document.visibilityState === 'visible') load(); };
+    document.addEventListener('visibilitychange', onVis);
+
+    return () => {
+      cancelled = true;
+      if (timerRef.current) clearInterval(timerRef.current);
+      document.removeEventListener('visibilitychange', onVis);
+    };
+  }, [intervalMs]);
+
+  return { oficial, error };
+}
 
 export default function DollarRates({ data, commission }) {
   const c = commission;
   const [showCalc, setShowCalc] = useState(false);
   const [shareSpec, setShareSpec] = useState(null);
+  const { oficial, error: oficialErr } = useDolarOficial();
+  const market = useMarketStatus();
 
   const rates = useMemo(() => {
     const al30 = extract(data?.AL30);
@@ -51,6 +124,7 @@ export default function DollarRates({ data, commission }) {
   return (
     <div style={S.wrapper}>
       <div style={S.toolbar}>
+        <MarketStatusBadge status={market} />
         <button
           style={S.calcBtn}
           onClick={() => setShowCalc(true)}
@@ -73,8 +147,9 @@ export default function DollarRates({ data, commission }) {
         </button>
       </div>
       <div style={S.grid}>
-        <DollarCard title="DÓLAR MEP" pair="AL30 / AL30D" rates={rates.mep} kind="mep" delay={0} onShare={setShareSpec} />
-        <DollarCard title="DÓLAR CCL" pair="AL30 / AL30C" rates={rates.ccl} kind="ccl" delay={100} onShare={setShareSpec} />
+        <OficialCard oficial={oficial} error={oficialErr} delay={0} />
+        <DollarCard title="DÓLAR MEP" pair="AL30 / AL30D" rates={rates.mep} kind="mep" delay={100} onShare={setShareSpec} />
+        <DollarCard title="DÓLAR CCL" pair="AL30 / AL30C" rates={rates.ccl} kind="ccl" delay={200} onShare={setShareSpec} />
       </div>
       <CanjeCard rates={rates.canje} delay={200} onShare={setShareSpec} />
       {showCalc && <FxCalculator rates={rates} commission={commission} onClose={() => setShowCalc(false)} />}
@@ -166,9 +241,111 @@ function CanjeCard({ rates, delay, onShare }) {
   );
 }
 
+function MarketStatusBadge({ status }) {
+  if (!status) return null; // primera carga, no mostramos nada
+  const { open, reason, nowAR, sessionStart, sessionEnd } = status;
+  const reasonLabel =
+    reason === 'fin_de_semana' ? 'Fin de semana' :
+    reason === 'pre_apertura'  ? 'Pre apertura' :
+    reason === 'post_cierre'   ? 'Post cierre'  : null;
+  const tooltip = open
+    ? `Mercado abierto · sesión ${sessionStart} – ${sessionEnd} (hora AR: ${nowAR})`
+    : `Mercado cerrado · próxima rueda ${sessionStart} – ${sessionEnd} (hora AR: ${nowAR})`;
+  return (
+    <div
+      style={open ? S.badgeOpen : S.badgeClosed}
+      title={tooltip}
+    >
+      <span style={open ? S.badgeDotOpen : S.badgeDotClosed} />
+      <span>{open ? 'MERCADO ABIERTO' : 'MERCADO CERRADO'}</span>
+      {!open && reasonLabel && <span style={S.badgeReason}>· {reasonLabel}</span>}
+    </div>
+  );
+}
+
+function OficialCard({ oficial, error, delay }) {
+  // Loading state mientras llega la primera respuesta.
+  if (!oficial && !error) {
+    return (
+      <div style={{ ...S.card, animationDelay: `${delay}ms` }}>
+        <div style={S.cardHeader}>
+          <span style={S.cardTitle}>DÓLAR OFICIAL</span>
+          <span style={S.cardSub}>cargando…</span>
+        </div>
+        <div style={S.oficialLoading}>—</div>
+      </div>
+    );
+  }
+
+  // Error sin payload cacheado: card chiquita con el error.
+  if (error && !oficial) {
+    return (
+      <div style={{ ...S.card, animationDelay: `${delay}ms` }}>
+        <div style={S.cardHeader}>
+          <span style={S.cardTitle}>DÓLAR OFICIAL</span>
+          <span style={{ ...S.cardSub, color: 'var(--red)' }}>error</span>
+        </div>
+        <div style={S.oficialErr}>{error}</div>
+      </div>
+    );
+  }
+
+  const { compra, venta, fechaActualizacion, source, stale } = oficial;
+  const sub =
+    source === 'bluelytics' ? 'BNA · vía Bluelytics' :
+    source === 'dolarapi'   ? 'BNA · vía DolarAPI' :
+                              'BNA';
+
+  return (
+    <div style={{ ...S.card, animationDelay: `${delay}ms` }}>
+      <div style={S.cardHeader}>
+        <span style={S.cardTitle}>DÓLAR OFICIAL</span>
+        <span style={S.cardSub}>{sub}</span>
+        {stale && <span style={S.staleBadge}>cache vencido</span>}
+      </div>
+      <div style={S.sidesRow}>
+        <div style={S.sideCol}>
+          <span style={{ ...S.sideLabel, color: 'var(--neon)' }}>COMPRA</span>
+          <span style={{ ...S.mainPrice, color: 'var(--neon)' }}>${fmtPrice(compra)}</span>
+        </div>
+        <div style={S.sideDivider} />
+        <div style={S.sideCol}>
+          <span style={{ ...S.sideLabel, color: 'var(--red)' }}>VENTA</span>
+          <span style={{ ...S.mainPrice, color: 'var(--red)' }}>${fmtPrice(venta)}</span>
+        </div>
+      </div>
+      <div style={S.oficialFooter}>
+        <span style={S.oficialFooterLabel}>ÚLTIMA ACTUALIZACIÓN</span>
+        <span style={S.oficialFooterValue}>{fmtUpdate(fechaActualizacion)}</span>
+      </div>
+    </div>
+  );
+}
+
+function fmtUpdate(iso) {
+  if (!iso) return '—';
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return '—';
+    return d.toLocaleString('es-AR', {
+      day:    '2-digit', month:  '2-digit',
+      hour:   '2-digit', minute: '2-digit',
+      hour12: false,
+    });
+  } catch { return '—'; }
+}
+
 const S = {
   wrapper: { display: 'flex', flexDirection: 'column', gap: 16 },
-  toolbar: { display: 'flex', justifyContent: 'flex-end' },
+  toolbar: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' },
+
+  // Badge "MERCADO ABIERTO/CERRADO"
+  badgeOpen:    { display: 'inline-flex', alignItems: 'center', gap: 8, padding: '7px 12px', background: 'rgba(57,255,20,0.06)', border: '1px solid rgba(57,255,20,0.35)', borderRadius: 6, color: 'var(--neon)', fontFamily: "'Roboto Mono', monospace", fontSize: 10, fontWeight: 700, letterSpacing: 2, cursor: 'help' },
+  badgeClosed:  { display: 'inline-flex', alignItems: 'center', gap: 8, padding: '7px 12px', background: 'rgba(245,158,11,0.06)', border: '1px solid rgba(245,158,11,0.4)',  borderRadius: 6, color: '#f59e0b',     fontFamily: "'Roboto Mono', monospace", fontSize: 10, fontWeight: 700, letterSpacing: 2, cursor: 'help' },
+  badgeDotOpen:   { width: 8, height: 8, borderRadius: '50%', background: 'var(--neon)', boxShadow: '0 0 8px var(--neon)' },
+  badgeDotClosed: { width: 8, height: 8, borderRadius: '50%', background: '#f59e0b' },
+  badgeReason:    { fontWeight: 400, opacity: 0.85, marginLeft: 4 },
+
   calcBtn: { display: 'inline-flex', alignItems: 'center', gap: 8, padding: '7px 12px', background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', fontFamily: "'Roboto Mono', monospace", fontSize: 10, fontWeight: 700, letterSpacing: 2, cursor: 'pointer', transition: 'all 0.15s' },
   loading: { textAlign: 'center', padding: 40 },
   loadingText: { fontFamily: "'Roboto Mono', monospace", fontSize: 12, color: 'var(--text-dim)', letterSpacing: 1 },
@@ -188,4 +365,12 @@ const S = {
   sinValue: { fontFamily: "'Roboto Mono', monospace", fontSize: 12, color: 'var(--text-dim)' },
   canjeDesc: { fontFamily: "'Roboto Mono', monospace", fontSize: 9, color: 'var(--text-dim)', letterSpacing: 1 },
   canjePrice: { fontFamily: "'Roboto Mono', monospace", fontSize: 24, fontWeight: 700, lineHeight: 1.2 },
+
+  // ── Dólar oficial ──
+  oficialLoading: { textAlign: 'center', padding: '20px 0', fontFamily: "'Roboto Mono', monospace", fontSize: 18, color: 'var(--text-dim)' },
+  oficialErr:     { textAlign: 'center', padding: '12px 0', fontFamily: "'Roboto Mono', monospace", fontSize: 11, color: 'var(--red)' },
+  oficialFooter:  { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 12, paddingTop: 10, borderTop: '1px solid var(--border)' },
+  oficialFooterLabel: { fontFamily: "'Roboto Mono', monospace", fontSize: 8, letterSpacing: 1.5, color: 'var(--text-dim)' },
+  oficialFooterValue: { fontFamily: "'Roboto Mono', monospace", fontSize: 10, color: 'var(--text-dim)' },
+  staleBadge:     { fontFamily: "'Roboto Mono', monospace", fontSize: 8, letterSpacing: 1, color: '#f59e0b', background: 'rgba(245,158,11,0.1)', border: '1px solid rgba(245,158,11,0.3)', borderRadius: 3, padding: '2px 6px', marginLeft: 'auto' },
 };

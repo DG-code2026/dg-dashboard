@@ -3,7 +3,7 @@ import express from 'express';
 import cors from 'cors';
 import { WebSocketServer, WebSocket } from 'ws';
 import http from 'http';
-import https from 'https';
+import { httpJson, singleflight, HttpError } from './lib/http.js';
 
 const app = express();
 app.use(cors());
@@ -24,13 +24,20 @@ const SUPA_URL = process.env.SUPABASE_URL;
 const SUPA_KEY = process.env.SUPABASE_KEY;
 
 async function supa(path, opts = {}) {
-  const res = await fetch(`${SUPA_URL}/rest/v1${path}`, {
+  // Timeout duro de 8s para que Supabase no cuelgue requests del cliente.
+  // Reintento implícito una vez en errores 5xx / network / timeout.
+  const { data } = await httpJson(`${SUPA_URL}/rest/v1${path}`, {
     method: opts.method || 'GET',
-    headers: { 'apikey': SUPA_KEY, 'Authorization': `Bearer ${SUPA_KEY}`, 'Content-Type': 'application/json', 'Prefer': opts.prefer || 'return=representation' },
-    body: opts.body ? JSON.stringify(opts.body) : undefined,
+    headers: {
+      'apikey': SUPA_KEY,
+      'Authorization': `Bearer ${SUPA_KEY}`,
+      'Prefer': opts.prefer || 'return=representation',
+    },
+    body: opts.body,
+    timeoutMs: 8000,
+    retries: 1,
   });
-  const text = await res.text();
-  try { return JSON.parse(text); } catch { return text; }
+  return data;
 }
 
 // ── Generic CRUD factory for favorites/soberanos tables ──
@@ -325,25 +332,70 @@ const PPI_AS = process.env.PPI_API_SECRET;
 let ppiToken = null, ppiRefreshTk = null, ppiExp = null;
 function ppiExpired() { return !ppiToken || !ppiExp || new Date() >= new Date(ppiExp); }
 
+// Wrapper sobre httpJson: mantiene la misma firma de retorno { status, data }
+// que tenía la versión vieja basada en https.request.
 function ppiFetch(path, opts = {}) {
-  return new Promise((resolve, reject) => {
-    const url = new URL(path, PPI_BASE);
-    const req = https.request({ method: opts.method || 'GET', hostname: url.hostname, port: 443, path: url.pathname + url.search, headers: { 'Content-Type': 'application/json', ...opts.headers } }, res => {
-      let body = ''; res.on('data', c => body += c); res.on('end', () => { try { resolve({ status: res.statusCode, data: JSON.parse(body) }); } catch { reject(new Error('PPI JSON')); } });
-    }); req.on('error', reject); if (opts.body) req.write(JSON.stringify(opts.body)); req.end();
+  const url = new URL(path, PPI_BASE).toString();
+  return httpJson(url, {
+    method: opts.method || 'GET',
+    headers: opts.headers,
+    body: opts.body,
+    timeoutMs: opts.timeoutMs ?? 10000,  // 10s — PPI a veces tarda
+    retries: opts.retries ?? 1,
+  }).catch(err => {
+    // Para que callers que esperaban { status } sigan funcionando ante errores
+    // que vienen con status (HTTP 4xx/5xx), retornamos un objeto en vez de tirar
+    // sólo si fue un 5xx final tras retries; el resto sigue tirando para forzar
+    // a que el handler los maneje.
+    if (err instanceof HttpError && err.kind === 'http') {
+      return { status: err.status, data: null };
+    }
+    throw err;
   });
 }
 
 async function ppiLogin() {
   console.log('🔑 PPI login...');
-  const r = await ppiFetch(`/api/${PPI_V}/Account/LoginApi`, { method: 'POST', headers: { AuthorizedClient: PPI_AC, ClientKey: PPI_CK, ApiKey: PPI_AK, ApiSecret: PPI_AS } });
+  const r = await ppiFetch(`/api/${PPI_V}/Account/LoginApi`, {
+    method: 'POST',
+    headers: { AuthorizedClient: PPI_AC, ClientKey: PPI_CK, ApiKey: PPI_AK, ApiSecret: PPI_AS },
+  });
   if (r.status !== 200) throw new Error(`PPI Login ${r.status}`);
   const s = Array.isArray(r.data) ? r.data[0] : r.data;
   ppiToken = s.accessToken; ppiRefreshTk = s.refreshToken; ppiExp = s.expirationDate;
   console.log('✅ PPI ok');
 }
-async function ppiRefresh() { try { const r = await ppiFetch(`/api/${PPI_V}/Account/RefreshToken`, { method: 'POST', headers: { AuthorizedClient: PPI_AC, ClientKey: PPI_CK }, body: { refreshToken: ppiRefreshTk } }); if (r.status !== 200) throw new Error(); const s = Array.isArray(r.data) ? r.data[0] : r.data; ppiToken = s.accessToken; ppiRefreshTk = s.refreshToken; ppiExp = s.expirationDate; } catch { return ppiLogin(); } }
-async function getPPIToken() { if (!ppiToken) return ppiLogin(); if (ppiExpired()) return ppiRefresh(); }
+
+async function ppiRefresh() {
+  try {
+    const r = await ppiFetch(`/api/${PPI_V}/Account/RefreshToken`, {
+      method: 'POST',
+      headers: { AuthorizedClient: PPI_AC, ClientKey: PPI_CK },
+      body: { refreshToken: ppiRefreshTk },
+    });
+    if (r.status !== 200) throw new Error(`PPI Refresh ${r.status}`);
+    const s = Array.isArray(r.data) ? r.data[0] : r.data;
+    ppiToken = s.accessToken; ppiRefreshTk = s.refreshToken; ppiExp = s.expirationDate;
+  } catch {
+    // Si el refresh falla (ej. refresh token expirado), caemos al login completo.
+    return ppiLogin();
+  }
+}
+
+// Singleton-flight: si dos requests con token expirado caen en paralelo, sólo
+// un refresh corre; los otros esperan al mismo Promise y reusan el token nuevo.
+// Resuelve el race condition #2 detectado en la auditoría.
+const refreshPpiToken = singleflight(async () => {
+  if (!ppiToken) return ppiLogin();
+  if (ppiExpired()) return ppiRefresh();
+});
+
+async function getPPIToken() {
+  if (ppiToken && !ppiExpired()) return ppiToken;
+  await refreshPpiToken();
+  return ppiToken;
+}
+
 function ppiH() { return { Authorization: `Bearer ${ppiToken}`, AuthorizedClient: PPI_AC, ClientKey: PPI_CK }; }
 
 // ── PPI Cache & Concurrency ──
@@ -558,23 +610,27 @@ app.post('/api/bolsar/cache/clear', (req, res) => { bolsarCache = { fetchedAt: 0
 // ══════════════════════════════════════════════
 const DESC_TTL = 60 * 60 * 1000; // 1 hora
 
-// Raw fetch — no rompe si la respuesta no es JSON (útil para diagnósticos).
-function ppiFetchRaw(path, opts = {}) {
-  return new Promise((resolve) => {
-    const url = new URL(path, PPI_BASE);
-    const req = https.request({ method: opts.method || 'GET', hostname: url.hostname, port: 443, path: url.pathname + url.search, headers: { 'Content-Type': 'application/json', ...opts.headers } }, res => {
-      let body = '';
-      res.on('data', c => body += c);
-      res.on('end', () => {
-        let data = null;
-        try { data = JSON.parse(body); } catch {}
-        resolve({ status: res.statusCode, data, body });
-      });
+// Raw fetch — nunca tira; útil para diagnósticos donde queremos status crudo.
+async function ppiFetchRaw(path, opts = {}) {
+  const url = new URL(path, PPI_BASE).toString();
+  try {
+    const { status, data } = await httpJson(url, {
+      method: opts.method || 'GET',
+      headers: opts.headers,
+      body: opts.body,
+      timeoutMs: opts.timeoutMs ?? 10000,
+      retries: 0,           // raw = sin retry, queremos ver el primer status
+      parseAs: 'text',      // no asumimos JSON
     });
-    req.on('error', e => resolve({ status: 0, data: null, body: '', error: e.message }));
-    if (opts.body) req.write(JSON.stringify(opts.body));
-    req.end();
-  });
+    let parsed = null;
+    try { parsed = data ? JSON.parse(data) : null; } catch {}
+    return { status, data: parsed, body: data || '' };
+  } catch (err) {
+    if (err instanceof HttpError && err.kind === 'http') {
+      return { status: err.status, data: null, body: '' };
+    }
+    return { status: 0, data: null, body: '', error: err.message };
+  }
 }
 
 // Mapeo tipo interno (app) → tipo PPI (SearchInstrument).
@@ -733,9 +789,36 @@ let allInstruments = [];
 // Settlement aliases: app-facing → Primary symbol suffix
 const SETTLEMENT_MAP = { 'A-24HS': '24hs', 'A-48HS': '48hs', 'INMEDIATA': 'CI', 'CI': 'CI', '24HS': '24hs', '48HS': '48hs' };
 
-function fetchJSON(path) { return new Promise((res, rej) => { const url = new URL(path, PRIMARY_REST_URL); const req = https.request({ method: 'GET', hostname: url.hostname, port: url.port || 443, path: url.pathname + url.search, headers: { 'X-Auth-Token': authToken } }, r => { let b = ''; r.on('data', c => b += c); r.on('end', () => { try { res(JSON.parse(b)); } catch { rej(new Error('JSON')); } }); }); req.on('error', rej); req.end(); }); }
+// Primary REST GET — usa httpJson con timeout 10s + 1 retry.
+async function fetchJSON(path) {
+  const url = new URL(path, PRIMARY_REST_URL).toString();
+  const { data } = await httpJson(url, {
+    method: 'GET',
+    headers: { 'X-Auth-Token': authToken },
+    timeoutMs: 10000,
+    retries: 1,
+  });
+  return data;
+}
 
-async function authPrimary() { return new Promise((res, rej) => { const url = new URL('/auth/getToken', PRIMARY_REST_URL); const req = https.request({ method: 'POST', hostname: url.hostname, port: url.port || 443, path: url.pathname, headers: { 'X-Username': PRIMARY_USER, 'X-Password': PRIMARY_PASS } }, r => { const t = r.headers['x-auth-token']; if (t) { authToken = t; console.log('✅ Primary'); res(t); } else rej(new Error('Auth fail')); }); req.on('error', rej); req.end(); }); }
+// Auth contra Primary — el token llega en el response header 'x-auth-token'.
+// Wrappeado con singleflight para que múltiples reconnects en paralelo
+// no disparen N logins simultáneos contra Primary (race-condition #2 audit).
+const authPrimary = singleflight(async () => {
+  const url = new URL('/auth/getToken', PRIMARY_REST_URL).toString();
+  const { headers } = await httpJson(url, {
+    method: 'POST',
+    headers: { 'X-Username': PRIMARY_USER, 'X-Password': PRIMARY_PASS },
+    timeoutMs: 10000,
+    retries: 1,
+    parseAs: 'text',  // /auth/getToken puede devolver body vacío
+  });
+  const t = headers.get('x-auth-token');
+  if (!t) throw new Error('Primary auth: x-auth-token header missing');
+  authToken = t;
+  console.log('✅ Primary auth ok');
+  return t;
+});
 
 async function discover() {
   try {
@@ -790,7 +873,55 @@ function subscribeDynamic(ticker, settlement) {
   return { ok: true, symbol: key, primarySymbol: inst.instrumentId.symbol };
 }
 
-function connectPrimary() { if (!authToken) return; primaryWs = new WebSocket(`${PRIMARY_WS_URL}/`, [], { headers: { 'X-Auth-Token': authToken } }); primaryWs.on('open', () => { console.log('✅ WS'); if (resolved.length) primaryWs.send(JSON.stringify({ type: 'smd', level: 1, entries: ['BI','OF','LA','CL','HI','LO','TV','OI','EV','NV'], products: resolved.map(i => ({ symbol: i.symbol, marketId: i.marketId })), depth: 1 })); }); primaryWs.on('message', raw => { try { const m = JSON.parse(raw.toString()); if (m.type === 'Md') { const s = symMap[m.instrumentId?.symbol] || m.instrumentId?.symbol; latestData[s] = { symbol: s, marketData: m.marketData, timestamp: Date.now() }; const p = JSON.stringify({ type: 'md_update', symbol: s, marketData: m.marketData, timestamp: Date.now() }); wss.clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(p); }); } } catch {} }); primaryWs.on('close', () => setTimeout(reconnect, 5000)); primaryWs.on('error', () => {}); }
+// ── WS heartbeat: si Primary deja de mandar bytes, ping/pong nos avisa ──
+let primaryHeartbeat = null;
+function startPrimaryHeartbeat() {
+  if (primaryHeartbeat) clearInterval(primaryHeartbeat);
+  primaryHeartbeat = setInterval(() => {
+    if (!primaryWs || primaryWs.readyState !== WebSocket.OPEN) return;
+    if (primaryWs.isAlive === false) {
+      // No respondió al ping anterior → reconnect.
+      console.warn('⚠️ Primary WS no respondió ping, terminando…');
+      try { primaryWs.terminate(); } catch {}
+      return;
+    }
+    primaryWs.isAlive = false;
+    try { primaryWs.ping(); } catch {}
+  }, 30000);
+}
+
+function connectPrimary() {
+  if (!authToken) return;
+  primaryWs = new WebSocket(`${PRIMARY_WS_URL}/`, [], { headers: { 'X-Auth-Token': authToken } });
+  primaryWs.isAlive = true;
+  primaryWs.on('open', () => {
+    console.log('✅ Primary WS connected');
+    if (resolved.length) primaryWs.send(JSON.stringify({
+      type: 'smd', level: 1,
+      entries: ['BI','OF','LA','CL','HI','LO','TV','OI','EV','NV'],
+      products: resolved.map(i => ({ symbol: i.symbol, marketId: i.marketId })),
+      depth: 1,
+    }));
+    startPrimaryHeartbeat();
+  });
+  primaryWs.on('pong', () => { primaryWs.isAlive = true; });
+  primaryWs.on('message', raw => {
+    try {
+      const m = JSON.parse(raw.toString());
+      if (m.type === 'Md') {
+        const s = symMap[m.instrumentId?.symbol] || m.instrumentId?.symbol;
+        latestData[s] = { symbol: s, marketData: m.marketData, timestamp: Date.now() };
+        const p = JSON.stringify({ type: 'md_update', symbol: s, marketData: m.marketData, timestamp: Date.now() });
+        wss.clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(p); });
+      }
+    } catch {}
+  });
+  primaryWs.on('close', () => {
+    if (primaryHeartbeat) { clearInterval(primaryHeartbeat); primaryHeartbeat = null; }
+    setTimeout(reconnect, 5000);
+  });
+  primaryWs.on('error', e => { console.warn('Primary WS error:', e.message); });
+}
 
 async function reconnect() { try { await authPrimary(); await discover(); connectPrimary(); setTimeout(resubscribeAllTrades, 3000); } catch { setTimeout(reconnect, 10000); } }
 
@@ -805,7 +936,27 @@ async function resubscribeAllTrades() {
   } catch (e) { console.error('Resubscribe trades:', e.message); }
 }
 
-wss.on('connection', ws => { const snap = Object.values(latestData); if (snap.length) ws.send(JSON.stringify({ type: 'snapshot', data: snap })); ws.send(JSON.stringify({ type: 'status', connected: primaryWs?.readyState === WebSocket.OPEN, tickers: TK })); });
+// Browser WS clients — heartbeat ping/pong para detectar conexiones zombi
+// (típico cuando el cliente cierra el laptop o cambia de red).
+wss.on('connection', ws => {
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
+  const snap = Object.values(latestData);
+  if (snap.length) ws.send(JSON.stringify({ type: 'snapshot', data: snap }));
+  ws.send(JSON.stringify({ type: 'status', connected: primaryWs?.readyState === WebSocket.OPEN, tickers: TK }));
+});
+
+const browserHeartbeat = setInterval(() => {
+  wss.clients.forEach(ws => {
+    if (ws.isAlive === false) {
+      try { ws.terminate(); } catch {}
+      return;
+    }
+    ws.isAlive = false;
+    try { ws.ping(); } catch {}
+  });
+}, 30000);
+wss.on('close', () => clearInterval(browserHeartbeat));
 
 app.get('/api/health', (req, res) => res.json({ status: 'ok', primary: primaryWs?.readyState === WebSocket.OPEN, supabase: !!SUPA_URL }));
 
@@ -823,6 +974,134 @@ app.post('/api/primary/subscribe', (req, res) => {
   const { ticker, settlement = 'A-24HS' } = req.body || {};
   if (!ticker) return res.status(400).json({ error: 'ticker required' });
   res.json(subscribeDynamic(String(ticker).toUpperCase(), settlement));
+});
+
+// ══════════════════════════════════════════════
+//  HORARIO DE MERCADO + PERSISTENCIA DE SNAPSHOT
+//
+//  Problema: Primary deja de mandar `Md` fuera de horario. Mientras el server
+//  esté vivo, `latestData` mantiene el último valor recibido (cierre). Pero si
+//  el server se reinicia (deploy, crash) durante off-hours, latestData queda
+//  vacío y el browser no ve nada hasta el próximo open.
+//
+//  Solución: persistimos `latestData` en Supabase (tabla settings, key
+//  `fx_market_snapshot`) cada N segundos en horario, y lo restauramos al boot.
+//  Así, si arrancás un domingo, el browser igual ve los precios de cierre del
+//  viernes.
+// ══════════════════════════════════════════════
+
+// Mercado argentino (BYMA) — lunes a viernes, 10:25 a 17:05 hora local AR.
+// Usamos Intl.DateTimeFormat con timeZone para que funcione independientemente
+// del TZ del host (Render corre en UTC).
+const MARKET_TZ = 'America/Argentina/Buenos_Aires';
+const MARKET_OPEN_MIN  = 10 * 60 + 25; // 10:25
+const MARKET_CLOSE_MIN = 17 * 60 + 5;  // 17:05
+
+function getBuenosAiresParts(now = new Date()) {
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    timeZone: MARKET_TZ,
+    weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false,
+  }).formatToParts(now);
+  const part = (t) => fmt.find(p => p.type === t)?.value;
+  return {
+    weekday: part('weekday'),    // 'Mon' .. 'Sun'
+    hour:    parseInt(part('hour'), 10),
+    minute:  parseInt(part('minute'), 10),
+  };
+}
+
+function isMarketOpen(now = new Date()) {
+  const { weekday, hour, minute } = getBuenosAiresParts(now);
+  if (!['Mon','Tue','Wed','Thu','Fri'].includes(weekday)) return false;
+  const m = hour * 60 + minute;
+  return m >= MARKET_OPEN_MIN && m <= MARKET_CLOSE_MIN;
+}
+
+function marketStatusPayload(now = new Date()) {
+  const { weekday, hour, minute } = getBuenosAiresParts(now);
+  const open = isMarketOpen(now);
+  const m = hour * 60 + minute;
+  const isWeekday = ['Mon','Tue','Wed','Thu','Fri'].includes(weekday);
+  let reason = null;
+  if (!open) {
+    if (!isWeekday) reason = 'fin_de_semana';
+    else if (m < MARKET_OPEN_MIN)  reason = 'pre_apertura';
+    else if (m > MARKET_CLOSE_MIN) reason = 'post_cierre';
+  }
+  return {
+    open,
+    reason,                                  // null si está abierto
+    timezone: MARKET_TZ,
+    nowAR: `${String(hour).padStart(2,'0')}:${String(minute).padStart(2,'0')}`,
+    weekday,
+    sessionStart: '10:25',
+    sessionEnd:   '17:05',
+  };
+}
+
+// ── Persistencia (Supabase / settings) ──
+const SNAPSHOT_KEY = 'fx_market_snapshot';
+
+async function saveMarketSnapshot(reason = 'periodic') {
+  if (!Object.keys(latestData).length) return;
+  const payload = {
+    savedAt:  Date.now(),
+    savedReason: reason,
+    marketOpen: isMarketOpen(),
+    data: latestData,        // { AL30: {...}, AL30D: {...}, AL30C: {...}, ... }
+  };
+  try {
+    const existing = await supa(`/settings?key=eq.${SNAPSHOT_KEY}`);
+    if (Array.isArray(existing) && existing.length) {
+      await supa(`/settings?key=eq.${SNAPSHOT_KEY}`, {
+        method: 'PATCH',
+        body: { value: payload, updated_at: new Date().toISOString() },
+      });
+    } else {
+      await supa('/settings', {
+        method: 'POST',
+        body: { key: SNAPSHOT_KEY, value: payload },
+      });
+    }
+  } catch (e) {
+    console.warn('[snapshot] save fallo:', e.message);
+  }
+}
+
+async function loadMarketSnapshot() {
+  try {
+    const data = await supa(`/settings?key=eq.${SNAPSHOT_KEY}`);
+    if (!Array.isArray(data) || !data[0]?.value?.data) return;
+    const snap = data[0].value;
+    Object.assign(latestData, snap.data);
+    const tickers = Object.keys(snap.data).join(', ');
+    const ageH = ((Date.now() - snap.savedAt) / 3_600_000).toFixed(1);
+    console.log(`💾 Snapshot restaurado: [${tickers}] · guardado hace ${ageH}h (${snap.savedReason})`);
+  } catch (e) {
+    console.warn('[snapshot] load fallo:', e.message);
+  }
+}
+
+// Save periódico cada 60s. Sólo escribimos cuando el mercado está abierto
+// (durante off-hours los datos no cambian y sería gasto al pedo de DB writes).
+// Excepción: el primer save fuera de horario después del cierre — para no
+// perder la actualización justo del cierre, hacemos un "save final" cada vez
+// que detectamos transición open→close.
+let lastMarketOpen = false;
+const SNAPSHOT_PERIODIC_MS = 60_000;
+setInterval(() => {
+  const open = isMarketOpen();
+  if (open) {
+    saveMarketSnapshot('periodic');
+  } else if (lastMarketOpen) {
+    // Justo cerró el mercado → forzar save final con el último estado.
+    saveMarketSnapshot('post_cierre');
+  }
+  lastMarketOpen = open;
+}, SNAPSHOT_PERIODIC_MS);
+
+app.get('/api/market/status', (req, res) => {
+  res.json(marketStatusPayload());
 });
 
 // ══════════════════════════════════════════════
@@ -898,4 +1177,147 @@ app.get('/api/fx/history', async (req, res) => {
   }
 });
 
-server.listen(PORT, async () => { console.log(`🚀 :${PORT}`); try { await authPrimary(); await discover(); connectPrimary(); setTimeout(resubscribeAllTrades, 3000); } catch (e) { console.error('Init:', e.message); setTimeout(reconnect, 10000); } });
+// ─────────────────────────────────────────────────────────────────────────────
+//  Dólar oficial Argentina — DolarAPI con fallback a Bluelytics.
+//
+//  - Cache en memoria de 30s (el oficial no se mueve más rápido que eso).
+//  - Singleflight para deduplicar concurrencia.
+//  - DolarAPI scrappea BNA y otros bancos. Si falla o devuelve algo raro,
+//    caemos a Bluelytics que es otra API libre con la misma referencia.
+// ─────────────────────────────────────────────────────────────────────────────
+const DOLAR_TTL_MS = 30_000;
+let dolarCache = { fetchedAt: 0, payload: null };
+
+async function fetchDolarOficialRaw() {
+  // 1) DolarAPI (primario)
+  try {
+    const { data } = await httpJson('https://dolarapi.com/v1/dolares/oficial', {
+      timeoutMs: 5000,
+      retries: 1,
+    });
+    if (data && Number.isFinite(+data.compra) && Number.isFinite(+data.venta)) {
+      return {
+        compra: +data.compra,
+        venta:  +data.venta,
+        fechaActualizacion: data.fechaActualizacion || new Date().toISOString(),
+        source: 'dolarapi',
+      };
+    }
+    throw new Error('payload inválido de DolarAPI');
+  } catch (e1) {
+    console.warn('[fx/oficial] DolarAPI falló:', e1.message);
+    // 2) Bluelytics (fallback)
+    const { data } = await httpJson('https://api.bluelytics.com.ar/v2/latest', {
+      timeoutMs: 5000,
+      retries: 1,
+    });
+    if (data?.oficial && Number.isFinite(+data.oficial.value_buy) && Number.isFinite(+data.oficial.value_sell)) {
+      return {
+        compra: +data.oficial.value_buy,
+        venta:  +data.oficial.value_sell,
+        fechaActualizacion: data.last_update || new Date().toISOString(),
+        source: 'bluelytics',
+      };
+    }
+    throw new Error('Ningún proveedor de dólar oficial respondió correctamente.');
+  }
+}
+
+// Singleflight: si llegan N requests concurrentes con cache vencido, sólo
+// disparamos UNA llamada upstream y todos los callers comparten el resultado.
+const fetchDolarOficial = singleflight(fetchDolarOficialRaw);
+
+app.get('/api/fx/oficial', async (req, res) => {
+  // Cache hit
+  const age = Date.now() - dolarCache.fetchedAt;
+  if (dolarCache.payload && age < DOLAR_TTL_MS) {
+    return res.json({ ...dolarCache.payload, cachedAgeMs: age });
+  }
+  try {
+    const payload = await fetchDolarOficial();
+    dolarCache = { fetchedAt: Date.now(), payload };
+    res.json({ ...payload, cachedAgeMs: 0 });
+  } catch (e) {
+    console.error('[fx/oficial]', e.message);
+    // Si tenemos algo cacheado aunque sea vencido, lo devolvemos (graceful degradation).
+    if (dolarCache.payload) {
+      return res.json({ ...dolarCache.payload, stale: true, cachedAgeMs: age });
+    }
+    res.status(502).json({ error: 'No se pudo obtener la cotización oficial.' });
+  }
+});
+
+server.listen(PORT, async () => {
+  console.log(`🚀 Server :${PORT}`);
+  // Restauramos snapshot ANTES de conectar al WS Primary, así si arrancamos
+  // fuera de horario los browsers que se conectan ya reciben los precios de
+  // cierre vía el `snapshot` que enviamos en `wss.on('connection')`.
+  await loadMarketSnapshot();
+  lastMarketOpen = isMarketOpen();
+  try {
+    await authPrimary();
+    await discover();
+    connectPrimary();
+    setTimeout(resubscribeAllTrades, 3000);
+  } catch (e) {
+    console.error('Init error:', e.message);
+    setTimeout(reconnect, 10000);
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Graceful shutdown — SIGTERM / SIGINT
+//  Importante para que el deploy en Render/Railway/etc no corte conexiones
+//  WS abruptamente, y que los clientes reconecten en orden.
+// ─────────────────────────────────────────────────────────────────────────────
+let shuttingDown = false;
+async function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`\n📴 ${signal} recibido — cerrando con elegancia…`);
+
+  // 0) Save final del snapshot — para no perder el cierre en deploys que
+  //    caen justo cuando el mercado cerró pero no tuvimos chance de save aún.
+  try { await saveMarketSnapshot('shutdown'); console.log('💾 Snapshot final guardado'); }
+  catch (e) { console.warn('snapshot shutdown:', e.message); }
+
+  // 1) Dejar de aceptar nuevas conexiones HTTP.
+  server.close(err => {
+    if (err) console.error('server.close error:', err.message);
+    else console.log('✅ HTTP server cerrado');
+  });
+
+  // 2) Cerrar WS browser clients.
+  try {
+    wss.clients.forEach(ws => {
+      try { ws.send(JSON.stringify({ type: 'shutdown' })); } catch {}
+      try { ws.close(1001, 'server shutdown'); } catch {}
+    });
+    wss.close(() => console.log('✅ WS server cerrado'));
+  } catch (e) { console.warn('wss.close:', e.message); }
+
+  // 3) Cerrar Primary WS upstream.
+  try {
+    if (primaryWs && primaryWs.readyState === WebSocket.OPEN) {
+      primaryWs.close(1001, 'server shutdown');
+    }
+  } catch (e) { console.warn('primaryWs.close:', e.message); }
+
+  // 4) Forzar exit si algo cuelga >5s.
+  setTimeout(() => {
+    console.warn('⚠️ Forzando exit tras 5s');
+    process.exit(0);
+  }, 5000).unref();
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT',  () => shutdown('SIGINT'));
+
+// No matar el proceso por errores no manejados; loguearlos. Si el server queda
+// inestable, el orquestador (Render/Docker) lo reiniciará por healthcheck.
+process.on('unhandledRejection', (reason) => {
+  console.error('🔥 unhandledRejection:', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('🔥 uncaughtException:', err);
+});
