@@ -24,7 +24,11 @@ const GREEN = '#22c55e';
 // El server cachea 6h en memoria; el cliente extra-cachea 1 día en localStorage.
 const CACHE_KEY = 'hp_bolsar_cal_v1'; // { fetchedOn: 'YYYY-MM-DD', events: [...] }
 
-// Feriados nacionales AR — lista estática 2025-2026.
+// Feriados nacionales AR — lista estática 2025-2027.
+// Para 2027 incluimos los inamovibles + los traslados típicos según el régimen
+// vigente (Decreto 1584/10): trasladables que caen Mar/Mié pasan al lunes anterior.
+// Si el ejecutivo aún no oficializó el calendario 2027, los "(traslado)"
+// son una estimación — actualizarlos cuando salga el Boletín Oficial.
 const HOLIDAYS = {
   '2025-01-01': 'Año Nuevo', '2025-03-03': 'Carnaval', '2025-03-04': 'Carnaval',
   '2025-03-24': 'Memoria', '2025-04-02': 'Malvinas', '2025-04-18': 'Viernes Santo',
@@ -41,6 +45,13 @@ const HOLIDAYS = {
   '2026-07-09': 'Independencia', '2026-08-17': 'Gral. San Martín',
   '2026-10-12': 'Diversidad Cultural', '2026-11-23': 'Soberanía (traslado)',
   '2026-12-08': 'Inmaculada Concepción', '2026-12-25': 'Navidad',
+  '2027-01-01': 'Año Nuevo', '2027-02-08': 'Carnaval', '2027-02-09': 'Carnaval',
+  '2027-03-24': 'Memoria', '2027-03-26': 'Viernes Santo', '2027-04-02': 'Malvinas',
+  '2027-05-01': 'Día del Trabajador', '2027-05-25': 'Revolución de Mayo',
+  '2027-06-17': 'Güemes', '2027-06-20': 'Día de la Bandera',
+  '2027-07-09': 'Independencia', '2027-08-16': 'Gral. San Martín (traslado)',
+  '2027-10-11': 'Diversidad Cultural (traslado)', '2027-11-22': 'Soberanía (traslado)',
+  '2027-12-08': 'Inmaculada Concepción', '2027-12-25': 'Navidad',
 };
 
 // ── Helpers ──
@@ -108,7 +119,7 @@ export default function HomePage() {
       <AperturasCard />
       <LinksUtilesCard />
       <ProximosPagosCard />
-      <EmptyCard slotIndex={2} />
+      <DiasHabilesCard />
     </div>
   );
 }
@@ -611,21 +622,30 @@ function AperturaRow({ cfg, copied, onCopy }) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 // Links de información: herramientas públicas de consulta.
+//  - FCI's: fonditos.ar es el screener público de fondos comunes (rojo).
 const INFO_LINKS = [
   { title: 'CURVAS TASA PESOS · FIJA, CER', url: 'https://breakeven.ar/curvas' },
   { title: 'BOND TERMINAL',                 url: 'https://bondterminal.com/' },
+  { title: "FCI's",                         url: 'https://fonditos.ar/', color: '#EF4444' },
 ];
 
-// Links de gestión: backends operativos de brokers. Cada uno con su color
-// corporativo para que el ojo los identifique sin leer. NETX360 combina
-// azul (texto/acento) con borde naranja (identidad Pershing).
+// Links de gestión: backends operativos de brokers + recursos. Cada uno con su
+// color corporativo para que el ojo los identifique sin leer. NETX360 y NETX
+// INVESTOR combinan azul (texto/acento) con borde naranja (identidad Pershing).
+//
+// Convención de colores secundarios:
+//  - RECURSOS PPI   → azul claro (#60A5FA) — más suave que BACKEND PPI (azul fuerte).
+//  - RECURSOS INVIU → verde claro (#4ADE80) — más suave que BACKEND INVIU.
 const GESTION_LINKS = [
-  { title: 'BACKEND INVIU',  url: 'https://asesor.inviu.com.ar/cval/BYMA/clients',                 color: '#22C55E' },
-  { title: 'BACKEND PPI',    url: 'https://backend.portfoliopersonal.com/',                        color: '#3B82F6' },
-  { title: 'BACKEND GLETIR', url: 'https://backend.gletir.com/Cuenta/Login?ReturnUrl=%2fCuenta',   color: '#64748B' },
-  { title: 'NETX360',        url: 'https://www2.netx360.com/',                                     color: '#2563EB', borderColor: '#F97316' },
+  { title: 'BACKEND INVIU',   url: 'https://asesor.inviu.com.ar/cval/BYMA/clients',                                              color: '#22C55E' },
+  { title: 'RECURSOS INVIU',  url: 'https://recursos.inviu.com.ar/index.php',                                                    color: '#4ADE80' },
+  { title: 'BACKEND PPI',     url: 'https://backend.portfoliopersonal.com/',                                                     color: '#3B82F6' },
+  { title: 'RECURSOS PPI',    url: 'https://sites.google.com/portfoliopersonal.com/eams/recursos/formularios?authuser=0',         color: '#60A5FA' },
+  { title: 'BACKEND GLETIR',  url: 'https://backend.gletir.com/Cuenta/Login?ReturnUrl=%2fCuenta',                                color: '#64748B' },
+  { title: 'NETX360',         url: 'https://www2.netx360.com/',                                                                  color: '#2563EB', borderColor: '#F97316' },
+  { title: 'NETX INVESTOR',   url: 'https://www.netxinvestor.com/nxi/welcome',                                                   color: '#2563EB', borderColor: '#F97316' },
   // TABLEAU: naranja azulado (brand orange Tableau #E8762C apagado hacia el azul).
-  { title: 'TABLEAU',        url: 'https://dashboards.portfoliopersonal.com/#/signin',             color: '#CC7A4C' },
+  { title: 'TABLEAU',         url: 'https://dashboards.portfoliopersonal.com/#/signin',                                          color: '#CC7A4C' },
 ];
 
 function LinksUtilesCard() {
@@ -716,11 +736,92 @@ function LinkRow({ link }) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  CARD · EMPTY (placeholder sin título aún)
+//  CARD · DÍAS HÁBILES
+//
+//  Muestra:
+//   - Mes actual: cuántos días hábiles quedan / del total del mes.
+//   - Otros meses (próximos o pasados): total de días hábiles.
+//   - Lista de feriados de ese mes (con día de la semana).
+//
+//  "Día hábil" = no fin de semana, no feriado nacional (HOLIDAYS).
+//  Navegación con ‹ / › y botón HOY. Sin hard cap — si el usuario navega
+//  más allá de la tabla de feriados, el contador sigue funcionando aunque
+//  podría sub-contar feriados no listados (mostramos un aviso).
 // ═══════════════════════════════════════════════════════════════════════════
 
-function EmptyCard({ slotIndex }) {
+function DiasHabilesCard() {
   const [hover, setHover] = useState(false);
+  const [monthOffset, setMonthOffset] = useState(0);
+
+  // Año máximo cubierto por la tabla HOLIDAYS — lo calculamos una vez al
+  // montar para mostrar un aviso cuando el usuario navega más allá.
+  const HOLIDAYS_LAST_YEAR = useMemo(() => {
+    let max = 0;
+    for (const k of Object.keys(HOLIDAYS)) {
+      const y = parseInt(k.slice(0, 4), 10);
+      if (Number.isFinite(y) && y > max) max = y;
+    }
+    return max;
+  }, []);
+
+  const info = useMemo(() => {
+    const today = new Date();
+    const todayKey = todayYmd();
+    const viewMonth = new Date(today.getFullYear(), today.getMonth() + monthOffset, 1);
+    const year = viewMonth.getFullYear();
+    const month = viewMonth.getMonth();
+    const lastDay = new Date(year, month + 1, 0).getDate();
+
+    let total = 0;
+    let remaining = 0;
+    let weekendCount = 0;
+    let holidayCount = 0;
+    const feriados = [];
+
+    for (let d = 1; d <= lastDay; d++) {
+      const dt = new Date(year, month, d);
+      const key = ymd(dt);
+      const wi = mondayIndex(dt);
+      const isWeekend = wi >= 5;
+      const holidayName = HOLIDAYS[key] || null;
+
+      if (isWeekend) weekendCount++;
+      if (holidayName) {
+        holidayCount++;
+        feriados.push({
+          day: d,
+          name: holidayName,
+          dayOfWeek: dt.toLocaleDateString('es-AR', { weekday: 'short' }).replace('.', '').toUpperCase(),
+          isWeekend,
+        });
+      }
+
+      const isBusiness = !isWeekend && !holidayName;
+      if (isBusiness) {
+        total++;
+        if (key >= todayKey) remaining++;
+      }
+    }
+
+    const isCurrentMonth = monthOffset === 0;
+    const isPast = monthOffset < 0;
+    const outOfRange = year > HOLIDAYS_LAST_YEAR;
+
+    return {
+      year, month, total, remaining,
+      weekendCount, holidayCount,
+      feriados,
+      monthTitle: monthLabelFull(viewMonth),
+      isCurrentMonth, isPast, outOfRange,
+    };
+  }, [monthOffset, HOLIDAYS_LAST_YEAR]);
+
+  // El número grande: mes actual = restantes; otros = total del mes.
+  const bigNumber = info.isCurrentMonth ? info.remaining : info.total;
+  const bigSub = info.isCurrentMonth
+    ? `restantes · ${info.total} en total`
+    : (info.isPast ? 'días hábiles (mes pasado)' : 'días hábiles');
+
   const cardStyle = { ...S.card, ...(hover ? S.cardHover : {}) };
 
   return (
@@ -731,15 +832,75 @@ function EmptyCard({ slotIndex }) {
     >
       <div style={S.cardHeader}>
         <div>
-          <div style={{ ...S.cardTitle, color: 'var(--text-dim)' }}>SLOT {slotIndex + 1}</div>
-          <div style={S.cardSub}>Disponible</div>
+          <div style={S.cardTitle}>DÍAS HÁBILES</div>
+          <div style={S.cardSub}>{info.monthTitle}</div>
+        </div>
+        <div style={S.cardTools}>
+          <button style={S.navBtn} onClick={() => setMonthOffset(o => o - 1)} title="Mes anterior">‹</button>
+          <button
+            style={{ ...S.navBtn, ...(monthOffset === 0 ? S.navBtnActive : {}) }}
+            onClick={() => setMonthOffset(0)}
+            title="Volver al mes actual"
+          >HOY</button>
+          <button style={S.navBtn} onClick={() => setMonthOffset(o => o + 1)} title="Mes siguiente">›</button>
         </div>
       </div>
 
-      <div style={S.placeholderBody}>
-        <div style={{ ...S.placeholderIcon, opacity: hover ? 0.7 : 0.25, fontSize: 44 }}>＋</div>
-        <div style={S.placeholderText}>Card vacía</div>
-        <div style={S.placeholderHint}>Por definir — reservá este espacio para un panel adicional.</div>
+      {/* Número grande + label */}
+      <div style={S.dhBigBox}>
+        <div style={S.dhBigNumber}>{bigNumber}</div>
+        <div style={S.dhBigSub}>{bigSub}</div>
+      </div>
+
+      {/* Breakdown del mes */}
+      <div style={S.dhStats}>
+        <div style={S.dhStatItem}>
+          <span style={S.dhStatValue}>{info.total + info.weekendCount + info.holidayCount}</span>
+          <span style={S.dhStatLabel}>DÍAS DEL MES</span>
+        </div>
+        <div style={S.dhStatItem}>
+          <span style={S.dhStatValue}>{info.weekendCount}</span>
+          <span style={S.dhStatLabel}>FINDES</span>
+        </div>
+        <div style={S.dhStatItem}>
+          <span style={{ ...S.dhStatValue, color: '#ef4444' }}>{info.holidayCount}</span>
+          <span style={S.dhStatLabel}>FERIADOS</span>
+        </div>
+      </div>
+
+      {/* Lista de feriados del mes */}
+      <div style={S.dhFeriadosBox}>
+        <div style={S.dhFeriadosTitle}>FERIADOS DEL MES</div>
+        {info.feriados.length === 0 ? (
+          <div style={S.dhFeriadosEmpty}>Sin feriados nacionales este mes.</div>
+        ) : (
+          <div style={S.dhFeriadosList}>
+            {info.feriados.map(f => (
+              <div key={f.day} style={S.dhFeriadoRow}>
+                <span style={S.dhFeriadoDate}>
+                  <span style={S.dhFeriadoDay}>{String(f.day).padStart(2, '0')}</span>
+                  <span style={S.dhFeriadoDow}>{f.dayOfWeek}</span>
+                </span>
+                <span style={S.dhFeriadoName}>{f.name}</span>
+                {f.isWeekend && (
+                  <span style={S.dhFeriadoBadge} title="Cae en finde — no afecta días hábiles">
+                    finde
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+        {info.outOfRange && (
+          <div style={S.dhWarning}>
+            ⚠ El año {info.year} aún no está oficializado en el calendario — los feriados pueden ser inexactos.
+          </div>
+        )}
+      </div>
+
+      <div style={S.summaryRow}>
+        <span>Lun a Vie · excl. feriados nacionales AR</span>
+        <span>HOY {new Date().toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit' })}</span>
       </div>
     </div>
   );
@@ -1057,4 +1218,109 @@ const S = {
   placeholderIcon: { fontSize: 40, transition: 'opacity 0.22s ease, transform 0.22s ease', color: 'var(--neon-dim)' },
   placeholderText: { fontFamily: "'Roboto',sans-serif", fontSize: 12, fontWeight: 700, letterSpacing: 3, color: 'var(--text-dim)' },
   placeholderHint: { fontFamily: "'Roboto Mono',monospace", fontSize: 10, color: 'var(--text-dim)', letterSpacing: 0.5, maxWidth: 280, lineHeight: 1.5, opacity: 0.7 },
+
+  // ── Días Hábiles card ──
+  dhBigBox: {
+    display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+    padding: '18px 12px 14px',
+    gap: 4,
+  },
+  dhBigNumber: {
+    fontFamily: "'Cormorant Garamond', Georgia, serif",
+    fontSize: 72, fontWeight: 600, lineHeight: 1,
+    color: 'var(--neon)',
+    textShadow: 'var(--neon-glow)',
+    letterSpacing: 1,
+  },
+  dhBigSub: {
+    fontFamily: "'Roboto Mono', monospace",
+    fontSize: 10, fontWeight: 700,
+    letterSpacing: 2, color: 'var(--text-dim)',
+    textTransform: 'uppercase',
+  },
+  dhStats: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(3, 1fr)',
+    gap: 8,
+    padding: '12px 10px',
+    margin: '6px 0 12px',
+    borderTop: '1px dashed var(--border)',
+    borderBottom: '1px dashed var(--border)',
+  },
+  dhStatItem: {
+    display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3,
+  },
+  dhStatValue: {
+    fontFamily: "'Roboto', sans-serif",
+    fontSize: 22, fontWeight: 700, color: 'var(--text)', lineHeight: 1,
+  },
+  dhStatLabel: {
+    fontFamily: "'Roboto Mono', monospace",
+    fontSize: 8, fontWeight: 700, letterSpacing: 1.5,
+    color: 'var(--text-dim)',
+  },
+  dhFeriadosBox: {
+    flex: 1,
+    display: 'flex', flexDirection: 'column', gap: 6,
+    minHeight: 0, // permite scroll interno si hay muchos
+  },
+  dhFeriadosTitle: {
+    fontFamily: "'Roboto Mono', monospace",
+    fontSize: 9, fontWeight: 700, letterSpacing: 2,
+    color: 'var(--text-dim)',
+  },
+  dhFeriadosEmpty: {
+    fontFamily: "'Roboto Mono', monospace",
+    fontSize: 10, color: 'var(--text-dim)',
+    opacity: 0.7, padding: '6px 0',
+  },
+  dhFeriadosList: {
+    display: 'flex', flexDirection: 'column', gap: 4,
+    overflowY: 'auto',
+    paddingRight: 2,
+  },
+  dhFeriadoRow: {
+    display: 'flex', alignItems: 'center', gap: 10,
+    padding: '6px 8px',
+    background: 'rgba(239,68,68,0.06)',
+    border: '1px solid rgba(239,68,68,0.18)',
+    borderRadius: 4,
+  },
+  dhFeriadoDate: {
+    display: 'inline-flex', flexDirection: 'column', alignItems: 'center',
+    minWidth: 30, gap: 1,
+  },
+  dhFeriadoDay: {
+    fontFamily: "'Roboto Mono', monospace",
+    fontSize: 14, fontWeight: 700, color: '#ef4444', lineHeight: 1,
+  },
+  dhFeriadoDow: {
+    fontFamily: "'Roboto Mono', monospace",
+    fontSize: 8, fontWeight: 700, letterSpacing: 1,
+    color: 'var(--text-dim)',
+  },
+  dhFeriadoName: {
+    flex: 1,
+    fontFamily: "'Roboto', sans-serif",
+    fontSize: 11, color: 'var(--text)',
+    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+  },
+  dhFeriadoBadge: {
+    fontFamily: "'Roboto Mono', monospace",
+    fontSize: 8, fontWeight: 700, letterSpacing: 1,
+    color: 'var(--text-dim)',
+    padding: '2px 5px',
+    background: 'rgba(128,128,128,0.18)',
+    borderRadius: 2,
+    textTransform: 'uppercase',
+  },
+  dhWarning: {
+    marginTop: 6,
+    padding: '6px 8px',
+    background: 'rgba(245,158,11,0.08)',
+    border: '1px solid rgba(245,158,11,0.3)',
+    borderRadius: 3,
+    fontFamily: "'Roboto Mono', monospace",
+    fontSize: 9, color: '#f59e0b', letterSpacing: 0.5, lineHeight: 1.5,
+  },
 };

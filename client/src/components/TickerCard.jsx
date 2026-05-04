@@ -26,13 +26,23 @@ export default function TickerCard({ ticker, label, data, delay }) {
     prevData.current = data;
   }, [data]);
 
-  const bid = getBid(data);
-  const offer = getOffer(data);
-  const bidSize = getBidSize(data);
+  const liveBid   = getBid(data);
+  const liveOffer = getOffer(data);
+  const last      = getLast(data);
+  const close     = getClose(data);
+
+  // Fallback post-cierre: si Primary dejó de mandar punta (mercado cerrado)
+  // mostramos CL — ergo last → close — para que la card siga teniendo info
+  // útil en lugar de "—". `usingClose` activa el badge "CIERRE".
+  const bid       = liveBid   ?? last ?? close;
+  const offer     = liveOffer ?? last ?? close;
+  const bidSize   = getBidSize(data);
   const offerSize = getOfferSize(data);
-  const last = getLast(data);
-  const hasData = bid !== null || offer !== null;
-  const spread = bid && offer ? (offer - bid).toFixed(2) : null;
+
+  const hasLive    = liveBid !== null || liveOffer !== null;
+  const hasAnyData = bid !== null || offer !== null;
+  const usingClose = !hasLive && hasAnyData;
+  const spread     = liveBid != null && liveOffer != null ? (liveOffer - liveBid).toFixed(2) : null;
 
   return (
     <div
@@ -48,15 +58,19 @@ export default function TickerCard({ ticker, label, data, delay }) {
           <span style={styles.label}>{label}</span>
         </div>
         <div style={styles.liveIndicator}>
+          {/* 3 estados: LIVE (punta real) · CIERRE (sólo CL, mercado cerrado) · SIN DATOS */}
           <div
             style={{
               ...styles.liveDot,
-              backgroundColor: hasData ? 'var(--green)' : 'var(--text-dim)',
-              boxShadow: hasData ? 'var(--green-glow)' : 'none',
+              backgroundColor: hasLive ? 'var(--green)' : (usingClose ? '#f59e0b' : 'var(--text-dim)'),
+              boxShadow: hasLive ? 'var(--green-glow)' : 'none',
             }}
           />
-          <span style={{ ...styles.liveText, color: hasData ? 'var(--green)' : 'var(--text-dim)' }}>
-            {hasData ? 'LIVE' : 'SIN DATOS'}
+          <span style={{
+            ...styles.liveText,
+            color: hasLive ? 'var(--green)' : (usingClose ? '#f59e0b' : 'var(--text-dim)'),
+          }}>
+            {hasLive ? 'LIVE' : (usingClose ? 'CIERRE' : 'SIN DATOS')}
           </span>
         </div>
       </div>
@@ -159,7 +173,15 @@ function getOfferSize(d) {
 function getLast(d) {
   if (!d?.marketData?.LA) return null;
   const la = d.marketData.LA;
+  if (Array.isArray(la)) return la[0]?.price ?? null;
   return la.price ?? null;
+}
+
+function getClose(d) {
+  if (!d?.marketData?.CL) return null;
+  const cl = d.marketData.CL;
+  if (Array.isArray(cl)) return cl[0]?.price ?? null;
+  return cl.price ?? null;
 }
 
 function formatPrice(p) {

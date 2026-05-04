@@ -15,6 +15,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { looksLikeXlsx, readXlsxToGrid } from '../lib/xlsx.js';
 
+const API = import.meta.env.VITE_API_URL || 'http://localhost:3001';
 const BG_URL    = '/logos/fondo%20pluma.svg';
 const LOGO_URL  = '/logos/DG%20tema%20oscuro.png';
 
@@ -283,19 +284,44 @@ function titleCaseName(name) {
     .join('');
 }
 
-function buildMessage({ nombre, cuenta, broker, saldo, moneda }) {
-  const monto = fmtAmount(saldo, moneda);
-  const al    = aliasFor(broker, moneda);
-  return (
-`Hola ${titleCaseName(nombre)},
-Te informamos que tu cuenta (CC N°: ${cuenta}, ${brokerLabel(broker)}) registra un saldo negativo de ${monto}. Te recuerdo que podés:
+// ─────────────────────────────────────────────────────────────────────────────
+//  TEMPLATE DE MENSAJE
+//
+//  El template es un string con variables entre paréntesis: (nombre), (cuenta),
+//  (broker), (monto), (alias). El editor de la UI las muestra como chips
+//  no-editables; al guardar/cargar, persistimos como string plano en BDD.
+//
+//  Vars soportadas (todas opcionales — si no aparecen en el template, no se
+//  sustituyen): (nombre), (cuenta), (broker), (monto), (alias).
+// ─────────────────────────────────────────────────────────────────────────────
+const TEMPLATE_VARS = ['nombre', 'cuenta', 'broker', 'monto', 'alias'];
+const TEMPLATE_VAR_RE = /\((nombre|cuenta|broker|monto|alias)\)/g;
+
+const DEFAULT_TEMPLATE =
+`Hola (nombre),
+Te informamos que tu cuenta (CC N°: (cuenta), (broker)) registra un saldo negativo de (monto). Te recuerdo que podés:
 1) Habilitarnos a vender algún activo para que quede cubierto.
 2) Transferir al siguiente alias:
 
-${al}
+(alias)
 
-Cualquier duda quedo a disposición, saludos!`
-  );
+Cualquier duda quedo a disposición, saludos!`;
+
+const SETTINGS_KEY = 'avisos_saldo_template';
+
+function applyTemplate(template, { nombre, cuenta, broker, saldo, moneda }) {
+  const vals = {
+    nombre: titleCaseName(nombre),
+    cuenta: String(cuenta || ''),
+    broker: brokerLabel(broker),
+    monto:  fmtAmount(saldo, moneda),
+    alias:  aliasFor(broker, moneda) || '',
+  };
+  return String(template || '').replace(TEMPLATE_VAR_RE, (_, k) => vals[k] ?? `(${k})`);
+}
+
+function buildMessage(data, template) {
+  return applyTemplate(template || DEFAULT_TEMPLATE, data);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -466,8 +492,50 @@ export default function AvisosSaldoPage() {
   });
   const [fileName, setFileName] = useState(() => loadDataset()?.fileName || '');
   const [marks, setMarks]       = useState(() => loadMarks());
+  const [template, setTemplate] = useState(DEFAULT_TEMPLATE);
+  const [tplLoaded, setTplLoaded] = useState(false);
+  const [tplStatus, setTplStatus] = useState(null); // 'saving' | 'saved' | 'err'
 
   const fileInputRef = useRef(null);
+
+  // Carga inicial del template desde BDD. Si falla o no hay setting guardado,
+  // usamos el default (sin marcar como "loaded" hasta no resolver para que el
+  // primer render no escriba un default-shaped al server).
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch(`${API}/api/db/settings`);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const d = await r.json();
+        if (cancelled) return;
+        const v = d?.[SETTINGS_KEY];
+        if (typeof v === 'string' && v.trim()) setTemplate(v);
+      } catch { /* sin red → default */ }
+      finally { if (!cancelled) setTplLoaded(true); }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  // Persist template (debounced). Sólo después de cargar (evita pisar BDD con default).
+  useEffect(() => {
+    if (!tplLoaded) return;
+    setTplStatus('saving');
+    const t = setTimeout(async () => {
+      try {
+        const r = await fetch(`${API}/api/db/settings/${SETTINGS_KEY}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ value: template }),
+        });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        setTplStatus('saved');
+      } catch {
+        setTplStatus('err');
+      }
+    }, 700);
+    return () => clearTimeout(t);
+  }, [template, tplLoaded]);
 
   const bgImg   = useImageAsset(BG_URL);
   const logoImg = useImageAsset(LOGO_URL);
@@ -571,6 +639,13 @@ export default function AvisosSaldoPage() {
 
   return (
     <div style={st.wrap}>
+      <MessageTemplateEditor
+        value={template}
+        onChange={setTemplate}
+        status={tplStatus}
+        onReset={() => setTemplate(DEFAULT_TEMPLATE)}
+      />
+
       {!parseResult && (
         <DropZone
           onDrop={onDrop}
@@ -618,6 +693,7 @@ export default function AvisosSaldoPage() {
                 originalNombre={r.nombre}
                 sent={!!mark.sent}
                 hasOverride={!!mark.nombreOverride}
+                template={template}
                 onToggleSent={() => updateMark(id, { sent: !mark.sent })}
                 onRenameSave={(newName) => {
                   const trimmed = String(newName || '').trim();
@@ -725,6 +801,186 @@ function Stat({ label, value, accent, dim, warn }) {
   );
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+//  MESSAGE TEMPLATE EDITOR
+//
+//  Renderiza un contentEditable que serializa a/desde el template plano.
+//  Las variables (nombre)/(cuenta)/(broker)/(monto)/(alias) aparecen como
+//  chips contentEditable=false → el usuario no puede editar el texto interno
+//  ni partirlas, sólo borrarlas como bloque.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Convierte el template plano en un string HTML con chips para los tokens.
+// El resto del texto va escapado y los \n se renderizan como <br>.
+function templateToHtml(template) {
+  const esc = (s) => String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+  let out = '';
+  let last = 0;
+  const re = new RegExp(TEMPLATE_VAR_RE.source, 'g');
+  let m;
+  while ((m = re.exec(template)) !== null) {
+    out += esc(template.slice(last, m.index)).replace(/\n/g, '<br>');
+    out += `<span data-var="${m[1]}" contenteditable="false" class="msg-tpl-chip">(${m[1]})</span>`;
+    last = m.index + m[0].length;
+  }
+  out += esc(template.slice(last)).replace(/\n/g, '<br>');
+  return out;
+}
+
+// Lee el contentEditable y lo serializa al string plano del template.
+// Recorre nodos: text → texto verbatim; <br> → \n; chip → "(varName)";
+// otros bloques → \n al final (defensa contra paste de listas/párrafos).
+function htmlToTemplate(rootEl) {
+  let out = '';
+  function walk(node) {
+    if (!node) return;
+    if (node.nodeType === Node.TEXT_NODE) {
+      out += node.nodeValue || '';
+      return;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return;
+    const tag = node.tagName;
+    if (tag === 'BR') { out += '\n'; return; }
+    const v = node.getAttribute('data-var');
+    if (v && TEMPLATE_VARS.includes(v)) { out += `(${v})`; return; }
+    // Bloques (DIV/P) → newline antes (browsers wrappean líneas en DIVs).
+    const isBlock = tag === 'DIV' || tag === 'P';
+    if (isBlock && out && !out.endsWith('\n')) out += '\n';
+    for (const child of node.childNodes) walk(child);
+  }
+  for (const child of rootEl.childNodes) walk(child);
+  // Normalizar: limpiar trailing whitespace por línea sin tocar contenido.
+  return out.replace(/ /g, ' ');
+}
+
+function MessageTemplateEditor({ value, onChange, status, onReset }) {
+  const ref = useRef(null);
+  const lastValRef = useRef(value);
+
+  // Re-render del HTML cuando el value cambia desde afuera (carga inicial,
+  // reset). NO re-renderizamos en cada keystroke porque eso destruiría la
+  // selección del cursor. Detectamos "cambio externo" comparando con el
+  // último valor que serializamos nosotros.
+  useEffect(() => {
+    if (!ref.current) return;
+    if (value === lastValRef.current) return;
+    lastValRef.current = value;
+    ref.current.innerHTML = templateToHtml(value);
+  }, [value]);
+
+  // Mount inicial.
+  useEffect(() => {
+    if (ref.current) ref.current.innerHTML = templateToHtml(value);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const handleInput = () => {
+    const next = htmlToTemplate(ref.current);
+    lastValRef.current = next;
+    onChange(next);
+  };
+
+  // Insertar un chip en la posición del cursor.
+  const insertVar = (name) => {
+    if (!TEMPLATE_VARS.includes(name)) return;
+    const el = ref.current;
+    el.focus();
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0) {
+      // sin cursor: append al final
+      el.insertAdjacentHTML('beforeend',
+        `<span data-var="${name}" contenteditable="false" class="msg-tpl-chip">(${name})</span>`);
+    } else {
+      const range = sel.getRangeAt(0);
+      // Asegurar que el insert ocurre dentro del editor.
+      if (!el.contains(range.commonAncestorContainer)) {
+        el.insertAdjacentHTML('beforeend',
+          `<span data-var="${name}" contenteditable="false" class="msg-tpl-chip">(${name})</span>`);
+      } else {
+        range.deleteContents();
+        const span = document.createElement('span');
+        span.setAttribute('data-var', name);
+        span.setAttribute('contenteditable', 'false');
+        span.className = 'msg-tpl-chip';
+        span.textContent = `(${name})`;
+        range.insertNode(span);
+        // mover cursor después del chip
+        range.setStartAfter(span);
+        range.setEndAfter(span);
+        sel.removeAllRanges();
+        sel.addRange(range);
+      }
+    }
+    handleInput();
+  };
+
+  // Sólo permitimos paste como texto plano — evita que peguen markup raro
+  // (Word, Sheets) que rompa el chip-rendering.
+  const handlePaste = (e) => {
+    e.preventDefault();
+    const text = (e.clipboardData || window.clipboardData).getData('text/plain');
+    document.execCommand('insertText', false, text);
+  };
+
+  const statusLabel =
+    status === 'saving' ? 'guardando…' :
+    status === 'saved'  ? '✓ guardado' :
+    status === 'err'    ? '× error al guardar' : '';
+  const statusColor =
+    status === 'saved' ? 'var(--neon)' :
+    status === 'err'   ? '#ef4444'     : 'var(--text-dim)';
+
+  return (
+    <div style={st.tplWrap}>
+      <style>{`
+        .msg-tpl-chip {
+          display: inline-block;
+          padding: 1px 6px;
+          margin: 0 1px;
+          border-radius: 3px;
+          background: rgba(0,255,170,0.12);
+          color: var(--neon);
+          border: 1px solid rgba(0,255,170,0.4);
+          font-family: 'Roboto Mono', monospace;
+          font-size: 11px;
+          font-weight: 700;
+          letter-spacing: 0.5px;
+          user-select: all;
+          cursor: default;
+        }
+      `}</style>
+      <div style={st.tplHeader}>
+        <div style={st.tplTitle}>PLANTILLA DEL MENSAJE</div>
+        <div style={st.tplStatus}>
+          <span style={{ color: statusColor }}>{statusLabel}</span>
+          <button onClick={onReset} style={st.tplReset} title="Restaurar plantilla por defecto">↺ DEFAULT</button>
+        </div>
+      </div>
+      <div style={st.tplVarRow}>
+        <span style={st.tplVarLabel}>insertar variable:</span>
+        {TEMPLATE_VARS.map(v => (
+          <button key={v} onClick={() => insertVar(v)} style={st.tplVarBtn}>({v})</button>
+        ))}
+      </div>
+      <div
+        ref={ref}
+        contentEditable
+        suppressContentEditableWarning
+        spellCheck={false}
+        onInput={handleInput}
+        onPaste={handlePaste}
+        style={st.tplEditor}
+      />
+      <div style={st.tplHint}>
+        Las variables entre paréntesis no se pueden editar — sólo se pueden insertar o eliminar como bloque. Se guarda automáticamente en BDD.
+      </div>
+    </div>
+  );
+}
+
 // Slug seguro para nombre de archivo: ASCII, sin espacios ni símbolos raros.
 function slugify(s) {
   return String(s || '')
@@ -739,6 +995,7 @@ function DebtorCard({
   originalNombre,
   hasOverride,
   sent,
+  template,
   onToggleSent,
   onRenameSave,
   bgImg,
@@ -880,14 +1137,14 @@ function DebtorCard({
   const copyTextOnly = useCallback(async (e) => {
     if (e) e.stopPropagation();
     try {
-      const message = buildMessage(data);
+      const message = buildMessage(data, template);
       await navigator.clipboard.writeText(message);
       flash(true, '✓ Mensaje copiado');
     } catch (err) {
       console.error('copyText:', err);
       flash(false, `× ${err.message || 'No se pudo copiar el mensaje'}`);
     }
-  }, [data]);
+  }, [data, template]);
 
   // Nombre mostrado: si el usuario lo editó, verbatim; si no, title-case.
   const displayName = hasOverride ? data.nombre : titleCaseName(data.nombre);
@@ -1070,4 +1327,16 @@ const st = {
   sentCheck:   { width: 14, height: 14, accentColor: 'var(--neon)', cursor: 'pointer', margin: 0 },
   sentLabel:   { fontFamily: "'Roboto Mono', monospace", fontSize: 9, letterSpacing: 1.5, color: 'var(--text-dim)' },
   sentLabelOn: { color: 'var(--neon)', fontWeight: 700 },
+
+  // ── Template editor ──
+  tplWrap:     { background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 6, padding: 14, display: 'flex', flexDirection: 'column', gap: 10 },
+  tplHeader:   { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, flexWrap: 'wrap' },
+  tplTitle:    { fontFamily: "'Roboto Mono', monospace", fontSize: 10, letterSpacing: 2, color: 'var(--text-dim)', textTransform: 'uppercase' },
+  tplStatus:   { display: 'flex', alignItems: 'center', gap: 12, fontFamily: "'Roboto Mono', monospace", fontSize: 10, letterSpacing: 1 },
+  tplReset:    { background: 'transparent', color: 'var(--text-dim)', border: '1px solid var(--border)', borderRadius: 3, padding: '4px 8px', fontFamily: "'Roboto Mono', monospace", fontSize: 9, letterSpacing: 1.5, cursor: 'pointer' },
+  tplVarRow:   { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' },
+  tplVarLabel: { fontFamily: "'Roboto Mono', monospace", fontSize: 9, letterSpacing: 1.5, color: 'var(--text-dim)', textTransform: 'uppercase' },
+  tplVarBtn:   { background: 'rgba(0,255,170,0.06)', color: 'var(--neon)', border: '1px solid rgba(0,255,170,0.4)', borderRadius: 3, padding: '3px 8px', fontFamily: "'Roboto Mono', monospace", fontSize: 10, fontWeight: 700, letterSpacing: 0.5, cursor: 'pointer' },
+  tplEditor:   { minHeight: 160, padding: 12, background: 'var(--input-bg, #0d1220)', border: '1px solid var(--border)', borderRadius: 4, fontFamily: "'Roboto', sans-serif", fontSize: 13, color: 'var(--text)', lineHeight: 1.55, outline: 'none', whiteSpace: 'pre-wrap', wordBreak: 'break-word' },
+  tplHint:     { fontFamily: "'Roboto Mono', monospace", fontSize: 9, color: 'var(--text-dim)', letterSpacing: 0.5, lineHeight: 1.5 },
 };

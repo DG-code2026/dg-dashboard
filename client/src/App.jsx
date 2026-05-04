@@ -7,6 +7,7 @@ import { useMarketData } from './hooks/useMarketData';
 import StatusBar from './components/StatusBar';
 import TickerCard from './components/TickerCard';
 import DollarRates from './components/DollarRates';
+import RatioIntradayCharts from './components/RatioIntradayCharts';
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  ROUTING + LAZY LOADING
@@ -208,7 +209,7 @@ function HomeRoute() {
 }
 
 function FxRoute() {
-  const { data } = useShellCtx();
+  const { data, primaryConnected } = useShellCtx();
   const [commission, setCommission] = useState(0.6);
   return (
     <>
@@ -243,6 +244,11 @@ function FxRoute() {
           <span style={st.commNote}>por operación (se aplica a cada pata: compra y venta de bonos)</span>
         </div>
         <DollarRates data={data} commission={commission / 100} />
+      </section>
+      <section style={{ marginTop: 32 }}>
+        <SH title="EVOLUCIÓN DEL TIPO DE CAMBIO" />
+        <p style={st.sectionSub}>MEP · CABLE · CANJE · CI · día (intradiario) / semana / mes / anual (cierres diarios)</p>
+        <RatioIntradayCharts connected={primaryConnected} />
       </section>
     </>
   );

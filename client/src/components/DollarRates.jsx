@@ -179,9 +179,20 @@ function ShareBtn({ onClick, color }) {
 function extract(d) {
   if (!d?.marketData) return null;
   const md = d.marketData;
-  const bid = Array.isArray(md.BI) ? md.BI[0]?.price : md.BI?.price;
-  const offer = Array.isArray(md.OF) ? md.OF[0]?.price : md.OF?.price;
+  let bid   = Array.isArray(md.BI) ? md.BI[0]?.price : md.BI?.price;
+  let offer = Array.isArray(md.OF) ? md.OF[0]?.price : md.OF?.price;
+  const last  = md.LA?.price ?? (Array.isArray(md.LA) ? md.LA[0]?.price : null);
   const close = md.CL?.price ?? (Array.isArray(md.CL) ? md.CL[0]?.price : null);
+
+  // Post-cierre: cuando el mercado cierra Primary deja de mandar BI/OF (no
+  // hay book activo) y a veces sólo persiste CL. Para que las cards de
+  // dólar sigan mostrando el último valor de cierre conocido en lugar de
+  // desaparecer, caemos a LA y luego a CL como punta sintética.
+  // Si bid == offer == close, la "var" vs cierre dará 0% — coherente con
+  // la realidad: no hay movimiento porque el mercado está cerrado.
+  if (bid == null)   bid   = last ?? close;
+  if (offer == null) offer = last ?? close;
+
   if (bid == null || offer == null) return null;
   return { bid, offer, close };
 }

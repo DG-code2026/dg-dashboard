@@ -32,10 +32,22 @@ export function useMarketData() {
           msg.data.forEach((d) => { snap[d.symbol] = d; });
           setData(snap);
         } else if (msg.type === 'md_update') {
-          setData((prev) => ({
-            ...prev,
-            [msg.symbol]: { symbol: msg.symbol, marketData: msg.marketData, timestamp: msg.timestamp },
-          }));
+          // Merge en lugar de reemplazar (matchea el comportamiento del server):
+          // un md_update suele traer sólo los entries que cambiaron. Si
+          // reemplazáramos, un tick con sólo CL borraría BI/OF/LA y las
+          // tarjetas mostrarían "SIN DATOS". Mergeando, lo último conocido
+          // de cada entry persiste hasta que llegue otro update explícito.
+          setData((prev) => {
+            const old = prev[msg.symbol]?.marketData || {};
+            return {
+              ...prev,
+              [msg.symbol]: {
+                symbol: msg.symbol,
+                marketData: { ...old, ...msg.marketData },
+                timestamp: msg.timestamp,
+              },
+            };
+          });
         } else if (msg.type === 'status') {
           setPrimaryConnected(msg.connected);
         }

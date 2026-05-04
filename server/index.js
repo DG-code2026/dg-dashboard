@@ -235,6 +235,54 @@ app.get('/api/db/propuestas', async (req, res) => {
   catch (e) { res.json([]); }
 });
 
+// Detecta si la respuesta de Supabase es un error de PostgREST. Si la tabla
+// no tiene una columna mandada (PGRST204), reintentamos sin esas columnas;
+// esto evita que la UI quede "guardando ok" mientras el INSERT falla en silencio.
+const OPTIONAL_PROPUESTA_COLS = ['override_count_enabled', 'override_count_label', 'override_count_value', 'perfil', 'notes'];
+
+function isPgrstSchemaError(r) {
+  return r && !Array.isArray(r) && (r.code === 'PGRST204' || r.code === '42703');
+}
+
+function stripUnknownCol(obj, errMsg) {
+  // El mensaje de PGRST204 es: "Could not find the 'foo' column of 'bar' in the schema cache"
+  const m = /'([^']+)' column/.exec(errMsg || '');
+  if (m && obj && Object.prototype.hasOwnProperty.call(obj, m[1])) {
+    const { [m[1]]: _drop, ...rest } = obj;
+    return { stripped: m[1], obj: rest };
+  }
+  return null;
+}
+
+async function supaInsertPropuesta(row) {
+  let cur = { ...row };
+  // Hasta 5 reintentos por columnas faltantes (uno por cada OPTIONAL col).
+  for (let i = 0; i < 6; i++) {
+    const r = await supa('/propuestas', { method: 'POST', body: cur });
+    if (Array.isArray(r)) return { ok: true, data: r[0] };
+    if (isPgrstSchemaError(r)) {
+      const s = stripUnknownCol(cur, r.message);
+      if (s) { cur = s.obj; continue; }
+    }
+    return { ok: false, err: r };
+  }
+  return { ok: false, err: { message: 'too many schema retries' } };
+}
+
+async function supaPatchPropuesta(id, body) {
+  let cur = { ...body };
+  for (let i = 0; i < 6; i++) {
+    const r = await supa(`/propuestas?id=eq.${id}`, { method: 'PATCH', body: cur });
+    if (Array.isArray(r)) return { ok: true, data: r[0] };
+    if (isPgrstSchemaError(r)) {
+      const s = stripUnknownCol(cur, r.message);
+      if (s) { cur = s.obj; continue; }
+    }
+    return { ok: false, err: r };
+  }
+  return { ok: false, err: { message: 'too many schema retries' } };
+}
+
 app.post('/api/db/propuestas', async (req, res) => {
   try {
     const body = req.body || {};
@@ -250,21 +298,29 @@ app.post('/api/db/propuestas', async (req, res) => {
       items: Array.isArray(body.items) ? body.items : [],
       notes: body.notes || '',
     };
-    // Overrides de display opcionales. Sólo los propagamos si el cliente los mandó
-    // — si la tabla Supabase no tiene la columna, no forzamos el insert. Igual la
-    // UI sigue funcionando en sesión; la persistencia se añade cuando se sume la columna.
+    // Overrides de display opcionales. Si Supabase no tiene la columna, supaInsertPropuesta
+    // las strippea automáticamente y reintenta — la UI sigue funcionando aunque la migración
+    // no esté corrida (la persistencia se añade cuando se sume la columna).
     if (body.override_count_enabled != null) row.override_count_enabled = !!body.override_count_enabled;
     if (body.override_count_label != null) row.override_count_label = body.override_count_label;
     if (body.override_count_value != null) row.override_count_value = body.override_count_value;
-    const r = await supa('/propuestas', { method: 'POST', body: row });
-    res.json(Array.isArray(r) ? r[0] : r);
+    const r = await supaInsertPropuesta(row);
+    if (!r.ok) {
+      console.error('POST propuesta failed:', r.err);
+      return res.status(500).json({ error: r.err?.message || 'unknown', detail: r.err });
+    }
+    res.json(r.data);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.patch('/api/db/propuestas/:id', async (req, res) => {
   try {
-    const r = await supa(`/propuestas?id=eq.${req.params.id}`, { method: 'PATCH', body: { ...req.body, updated_at: new Date().toISOString() } });
-    res.json(Array.isArray(r) ? r[0] : r);
+    const r = await supaPatchPropuesta(req.params.id, { ...req.body, updated_at: new Date().toISOString() });
+    if (!r.ok) {
+      console.error('PATCH propuesta failed:', r.err);
+      return res.status(500).json({ error: r.err?.message || 'unknown', detail: r.err });
+    }
+    res.json(r.data);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -910,7 +966,17 @@ function connectPrimary() {
       const m = JSON.parse(raw.toString());
       if (m.type === 'Md') {
         const s = symMap[m.instrumentId?.symbol] || m.instrumentId?.symbol;
-        latestData[s] = { symbol: s, marketData: m.marketData, timestamp: Date.now() };
+        // Merge en lugar de reemplazar: Primary suele mandar refresheos
+        // incrementales (sólo los entries que cambiaron). Si reemplazáramos,
+        // un update con sólo CL borraría BI/OF y las cards quedarían "SIN
+        // DATOS" post-cierre. Con merge, los últimos BI/OF/LA conocidos
+        // sobreviven hasta que Primary mande explícitamente otros valores.
+        const prevMd = latestData[s]?.marketData || {};
+        const mergedMd = { ...prevMd, ...m.marketData };
+        latestData[s] = { symbol: s, marketData: mergedMd, timestamp: Date.now() };
+        // Mandamos al cliente sólo el delta — el cliente hace su propio merge
+        // (en useMarketData), así nuevos navegadores reciben el estado completo
+        // vía 'snapshot' y los ya conectados aplican incrementales.
         const p = JSON.stringify({ type: 'md_update', symbol: s, marketData: m.marketData, timestamp: Date.now() });
         wss.clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(p); });
       }
@@ -1087,6 +1153,11 @@ async function loadMarketSnapshot() {
 // Excepción: el primer save fuera de horario después del cierre — para no
 // perder la actualización justo del cierre, hacemos un "save final" cada vez
 // que detectamos transición open→close.
+//
+// Mismo tick aprovechamos para guardar el cierre diario en `daily_fx_closes`:
+//   - Transición open→close → 1 save (es el momento canónico del cierre).
+//   - Si arrancamos post-close y no guardamos hoy todavía → catch-up en el
+//     próximo tick mientras `latestData` esté fresco (ver maybeSaveFxClose).
 let lastMarketOpen = false;
 const SNAPSHOT_PERIODIC_MS = 60_000;
 setInterval(() => {
@@ -1096,6 +1167,20 @@ setInterval(() => {
   } else if (lastMarketOpen) {
     // Justo cerró el mercado → forzar save final con el último estado.
     saveMarketSnapshot('post_cierre');
+    // FX daily close: idempotente, así que es seguro fire-and-forget.
+    maybeSaveFxClose('on_close_transition');
+  } else {
+    // Mercado cerrado y sin transición. Si arrancamos el server post-cierre
+    // (deploy/restart), todavía no guardamos hoy y `latestData` es fresco
+    // (gracias al snapshot persistido en `settings`), tiramos un save de
+    // catch-up. `maybeSaveFxClose` hace el guard de día y de freshness, así
+    // que en feriados o sin data simplemente no escribe.
+    const { weekday, hour, minute } = getBuenosAiresParts();
+    const isWeekday = ['Mon','Tue','Wed','Thu','Fri'].includes(weekday);
+    const m = hour * 60 + minute;
+    if (isWeekday && m > MARKET_CLOSE_MIN) {
+      maybeSaveFxClose('post_close_catchup');
+    }
   }
   lastMarketOpen = open;
 }, SNAPSHOT_PERIODIC_MS);
@@ -1105,7 +1190,22 @@ app.get('/api/market/status', (req, res) => {
 });
 
 // ══════════════════════════════════════════════
-//  FX DAILY CLOSES — auto-save to Supabase
+//  FX DAILY CLOSES — auto-save a Supabase
+//
+//  Estrategia "óptima" (1 escritura por rueda):
+//    1. Al detectar transición open→close en el scheduler de snapshots (que
+//       ya corre cada 60s), llamamos a maybeSaveFxClose('on_close').
+//    2. Si el server arranca DESPUÉS del cierre (deploy/restart post-17:05) y
+//       todavía no guardamos hoy, hacemos un "catch-up" en el siguiente tick.
+//    3. Idempotencia:
+//        - Flag in-memory `lastFxSaveDate` evita reintentos en el mismo proceso.
+//        - El upsert en BDD evita duplicados si dos procesos guardan a la vez.
+//    4. Antifaz para feriados / WS caído: requerimos que `latestData` tenga
+//       timestamp del día AR. Si BYMA estuvo cerrado todo el día, no hay
+//       updates frescos y SKIPPEAMOS el save (evitamos cargar una fila con
+//       precios de la rueda anterior).
+//    5. Fecha en zona AR (no UTC) — evita escribir el día equivocado en
+//       transiciones nocturnas raras.
 // ══════════════════════════════════════════════
 
 function extractPrice(sym, entry) {
@@ -1119,18 +1219,40 @@ function extractPrice(sym, entry) {
   return null;
 }
 
-async function saveDailyFxClose() {
+// Día calendario en zona AR (YYYY-MM-DD). 'en-CA' formatea ISO-style por default.
+function todayKeyAR(d = new Date()) {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: MARKET_TZ,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(d);
+}
+
+// `latestData` está fresco si al menos 1 de los 3 tickers FX tiene timestamp
+// del día AR de hoy. En feriados o caídas del WS, los timestamps quedan en
+// días viejos (o vacíos al arrancar el server) → devolvemos false.
+function isFxLatestDataFresh() {
+  const today = todayKeyAR();
+  for (const sym of ['AL30', 'AL30D', 'AL30C']) {
+    const ts = latestData[sym]?.timestamp;
+    if (Number.isFinite(ts) && todayKeyAR(new Date(ts)) === today) return true;
+  }
+  return false;
+}
+
+let lastFxSaveDate = null;
+
+async function saveDailyFxClose(reason = 'manual') {
   try {
-    const al30b = extractPrice('AL30', 'BI'), al30o = extractPrice('AL30', 'OF'), al30c = extractPrice('AL30', 'CL');
+    const al30b = extractPrice('AL30', 'BI'),  al30o  = extractPrice('AL30', 'OF'),  al30c  = extractPrice('AL30', 'CL');
     const al30db = extractPrice('AL30D', 'BI'), al30do = extractPrice('AL30D', 'OF'), al30dc = extractPrice('AL30D', 'CL');
     const al30cb = extractPrice('AL30C', 'BI'), al30co = extractPrice('AL30C', 'OF'), al30cc = extractPrice('AL30C', 'CL');
 
     if (!al30b || !al30o || !al30db || !al30do || !al30cb || !al30co) {
-      console.log('⏳ FX save: not enough data yet');
-      return;
+      console.log(`⏳ FX save (${reason}): not enough data yet`);
+      return { ok: false, reason: 'no_data' };
     }
 
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayKeyAR();
     const row = {
       date: today,
       al30_bid: al30b, al30_offer: al30o, al30_close: al30c,
@@ -1144,23 +1266,40 @@ async function saveDailyFxClose() {
       canje_venta: (al30db / al30co) - 1,
     };
 
-    // Upsert (insert or update if date exists)
+    // Upsert (insert or patch si la fecha ya existe).
     const existing = await supa(`/daily_fx_closes?date=eq.${today}`);
     if (Array.isArray(existing) && existing.length > 0) {
       await supa(`/daily_fx_closes?date=eq.${today}`, { method: 'PATCH', body: row });
     } else {
       await supa('/daily_fx_closes', { method: 'POST', body: row });
     }
-    console.log(`💾 FX saved: ${today} MEP ${row.mep_compra.toFixed(2)} / CCL ${row.ccl_compra.toFixed(2)}`);
+    lastFxSaveDate = today;
+    console.log(`💾 FX saved (${reason}): ${today} MEP ${row.mep_compra.toFixed(2)} / CCL ${row.ccl_compra.toFixed(2)}`);
+    return { ok: true, date: today, mep: row.mep_compra, ccl: row.ccl_compra };
   } catch (e) {
     console.error('❌ FX save error:', e.message);
+    return { ok: false, reason: 'error', error: e.message };
   }
 }
 
-// FX auto-save disabled per user request.
-// Manual save trigger (kept for backwards compatibility but disabled)
+// Wrapper idempotente: 1 save por día calendario AR, exigiendo data fresca.
+// `force` saltea el guard de `lastFxSaveDate` (lo usa el endpoint manual).
+async function maybeSaveFxClose(reason, { force = false } = {}) {
+  const today = todayKeyAR();
+  if (!force && lastFxSaveDate === today) return { ok: false, reason: 'already_saved' };
+  if (!isFxLatestDataFresh()) {
+    console.log(`⏸ FX save (${reason}): WS data stale (probablemente feriado o WS caído)`);
+    return { ok: false, reason: 'stale_data' };
+  }
+  return saveDailyFxClose(reason);
+}
+
+// Manual save trigger (útil para testing y para forzar un save fuera del
+// horario habitual). Acepta ?force=1 para saltear el flag de "ya guardamos hoy".
 app.post('/api/fx/save', async (req, res) => {
-  res.json({ ok: false, disabled: true });
+  const force = req.query.force === '1' || req.body?.force === true;
+  const result = await maybeSaveFxClose('manual', { force });
+  res.json(result);
 });
 
 // GET historical FX data
@@ -1174,6 +1313,241 @@ app.get('/api/fx/history', async (req, res) => {
     res.json(Array.isArray(data) ? data : []);
   } catch (e) {
     res.status(500).json({ error: e.message });
+  }
+});
+
+// ══════════════════════════════════════════════
+//  FX INTRADAY SAMPLES — sampler 5min alineado al reloj
+//
+//  Estrategia (v2 — usa REST en lugar de WS para el sample):
+//   - Cada 5 min en wall-clock (10:25, 10:30, 10:35, ...) durante mercado
+//     abierto, GET `/rest/marketdata/get` por cada uno de AL30/AL30D/AL30C,
+//     extraemos LA (último operado) y guardamos a `intraday_fx_samples`.
+//     Esto es más confiable que el WS para snapshots periódicos: siempre
+//     trae el último precio cerrado por trade real (no mid sintético) y no
+//     depende del estado de la conexión WS.
+//   - Si REST falla por algún ticker, completamos el row con bid/offer del
+//     WS (`latestData`) como fallback — así el row no se pierde.
+//   - El primer save de un día nuevo (detectado por cambio de `lastIntraSaveDate`)
+//     dispara un purge de TODOS los rows de fechas distintas a la de hoy.
+//     Así arrancamos cada rueda "de cero" pero conservamos los samples del
+//     último día de mercado durante fines de semana / feriados.
+// ══════════════════════════════════════════════
+
+const INTRA_SAMPLE_INTERVAL_MS = 5 * 60_000; // 5 min
+let lastIntraSaveDate = null;
+
+// Llamada REST a Primary para traer market data del símbolo dado. Devuelve
+// el objeto `marketData` (mismo shape que el WS) o null si falla.
+//
+// Notas de encoding:
+//  - Usamos encodeURIComponent en lugar de URLSearchParams porque algunas
+//    instalaciones de Primary parsean estricto y no aceptan `+` para espacios
+//    (URLSearchParams default) — sólo `%20`. Y para `entries` queremos que las
+//    comas queden literales (no `%2C`).
+//  - Si la respuesta no es JSON, logueamos un fragmento del body crudo para
+//    poder diagnosticar (por ej. una página HTML de error de proxy / WAF).
+async function fetchPrimaryMarketData(symbol, marketId = 'ROFX') {
+  if (!authToken) {
+    try { await authPrimary(); } catch { return null; }
+  }
+  const path = `/rest/marketdata/get`
+    + `?marketId=${encodeURIComponent(marketId)}`
+    + `&symbol=${encodeURIComponent(symbol)}`
+    + `&entries=BI,OF,LA,CL`
+    + `&depth=1`;
+  const url = new URL(path, PRIMARY_REST_URL).toString();
+  try {
+    const r = await fetch(url, {
+      method: 'GET',
+      headers: { 'X-Auth-Token': authToken, 'Accept': 'application/json' },
+    });
+    const text = await r.text();
+    if (!r.ok) {
+      console.warn(`[intra] REST ${r.status} for ${symbol}: ${text.slice(0, 160)}`);
+      return null;
+    }
+    let d;
+    try { d = JSON.parse(text); }
+    catch {
+      console.warn(`[intra] non-JSON for ${symbol} (${r.status}): ${text.slice(0, 160)}`);
+      return null;
+    }
+    if (d?.status === 'OK' && d.marketData) return d.marketData;
+    // Status no-OK: logueamos pero no como warning ruidoso (sucede cuando no
+    // hubo trade aún en el día, p.ej.).
+    if (d?.status && d.status !== 'OK') {
+      console.log(`[intra] REST status=${d.status} for ${symbol}: ${d.description || ''}`);
+    }
+    return null;
+  } catch (e) {
+    console.warn(`[intra] REST fetch fail for ${symbol}:`, e.message);
+    return null;
+  }
+}
+
+// Extrae LA / BI / OF de un payload de marketData (sirve tanto para REST como WS).
+function extractFromMd(md, entry) {
+  if (!md) return null;
+  const v = md[entry];
+  if (!v) return null;
+  if (Array.isArray(v)) return v[0]?.price ?? null;
+  return v.price ?? null;
+}
+
+// Devuelve el símbolo Primary completo (ej. "MERV - XMEV - AL30 - CI") para
+// uno de nuestros tickers cortos (AL30/AL30D/AL30C). Lo sacamos del symMap
+// inverso ya construido en `discover()`.
+function primarySymbolFor(shortTicker) {
+  for (const [primarySym, k] of Object.entries(symMap)) {
+    if (k === shortTicker) return primarySym;
+  }
+  return null;
+}
+
+async function saveIntraFxSample() {
+  try {
+    if (!isMarketOpen()) return { ok: false, reason: 'market_closed' };
+
+    // 1) Pedimos LA por REST a los 3 tickers en paralelo. Si el símbolo
+    //    Primary no está resuelto todavía (discover no corrió), saltamos.
+    const tickers = ['AL30', 'AL30D', 'AL30C'];
+    const restMd = await Promise.all(tickers.map(async (t) => {
+      const sym = primarySymbolFor(t);
+      if (!sym) return null;
+      // marketId del instrumento resuelto:
+      const inst = resolved.find(i => symMap[i.symbol] === t);
+      return fetchPrimaryMarketData(sym, inst?.marketId || 'ROFX');
+    }));
+
+    // 2) Por cada ticker, preferimos LA del REST. Como fallback caemos al
+    //    último valor del WS (`latestData[t].marketData`), que sirve si
+    //    el REST devolvió error pero el WS sí tiene un LA cargado.
+    const get = (idx, t, entry) => {
+      const md  = restMd[idx];
+      const fromRest = extractFromMd(md, entry);
+      if (Number.isFinite(fromRest) && fromRest > 0) return fromRest;
+      const fromWs = extractFromMd(latestData[t]?.marketData, entry);
+      return Number.isFinite(fromWs) && fromWs > 0 ? fromWs : null;
+    };
+
+    const al30_last  = get(0, 'AL30',  'LA');
+    const al30d_last = get(1, 'AL30D', 'LA');
+    const al30c_last = get(2, 'AL30C', 'LA');
+
+    // Si no tenemos NINGÚN LA (ni REST ni WS) para los 3, abortamos. Eso
+    // suele pasar la primera vez que se carga el server fuera de horario o
+    // si Primary no devolvió nada todavía.
+    if (!al30_last || !al30d_last || !al30c_last) {
+      return { ok: false, reason: 'no_last_price' };
+    }
+
+    const today = todayKeyAR();
+
+    if (lastIntraSaveDate !== today) {
+      try {
+        await supa(`/intraday_fx_samples?ar_date=neq.${today}`, { method: 'DELETE' });
+        console.log(`🧹 Intraday FX: purgados samples de días anteriores (rueda ${today})`);
+      } catch (e) { console.warn('[intra] purge fail:', e.message); }
+    }
+
+    await supa('/intraday_fx_samples', { method: 'POST', body: {
+      ar_date: today,
+      al30_last, al30d_last, al30c_last,
+    }});
+    lastIntraSaveDate = today;
+    return {
+      ok: true,
+      mep:   +(al30_last  / al30d_last).toFixed(2),
+      ccl:   +(al30_last  / al30c_last).toFixed(2),
+      canje: +(((al30d_last / al30c_last) - 1) * 100).toFixed(2),
+    };
+  } catch (e) {
+    console.warn('[intra] save fail:', e.message);
+    return { ok: false, reason: 'error', error: e.message };
+  }
+}
+
+// Schedule del próximo sample alineado al wall-clock 5-min siguiente.
+// Ej: si arrancamos a las 11:32:14, el primer save cae a las 11:35:00.
+// El "+150ms" es para asegurarnos de cruzar el boundary y no caer en :04:59
+// por jitter del setTimeout.
+function scheduleNextIntraSample() {
+  const now = Date.now();
+  const next = Math.ceil(now / INTRA_SAMPLE_INTERVAL_MS) * INTRA_SAMPLE_INTERVAL_MS;
+  const delay = Math.max(1000, next - now + 150);
+  setTimeout(async () => {
+    try { await saveIntraFxSample(); } catch {}
+    scheduleNextIntraSample();
+  }, delay);
+}
+scheduleNextIntraSample();
+
+// GET intraday samples del día corriente AR.
+app.get('/api/fx/intraday', async (req, res) => {
+  try {
+    const today = todayKeyAR();
+    const data = await supa(`/intraday_fx_samples?ar_date=eq.${today}&order=t.asc&limit=200`);
+    res.json(Array.isArray(data) ? data : []);
+  } catch (e) {
+    console.error('[intra] fetch error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Trigger manual de un sample intradiario (testing). Acepta ?force=1 para
+// saltearse el guard de mercado abierto. Igual exige tener algún LA válido
+// (REST o WS) para los 3 tickers — sin precio último no hay nada que guardar.
+app.post('/api/fx/intraday/save', async (req, res) => {
+  const force = req.query.force === '1';
+  if (force) {
+    // Bypass del isMarketOpen(): llamamos directo al sampler salteándonos
+    // ese guard. Por eso parchamos isMarketOpen temporalmente.
+    const orig = isMarketOpen;
+    // eslint-disable-next-line no-global-assign
+    global.__forceMarketOpen = true;
+  }
+  try {
+    const result = force
+      // Llamada directa que ignora isMarketOpen — replicamos la lógica corta
+      ? await (async () => {
+          const tickers = ['AL30', 'AL30D', 'AL30C'];
+          const restMd = await Promise.all(tickers.map(async (t) => {
+            const sym = primarySymbolFor(t);
+            if (!sym) return null;
+            const inst = resolved.find(i => symMap[i.symbol] === t);
+            return fetchPrimaryMarketData(sym, inst?.marketId || 'ROFX');
+          }));
+          const get = (idx, t, entry) => {
+            const fromRest = extractFromMd(restMd[idx], entry);
+            if (Number.isFinite(fromRest) && fromRest > 0) return fromRest;
+            const fromWs = extractFromMd(latestData[t]?.marketData, entry);
+            return Number.isFinite(fromWs) && fromWs > 0 ? fromWs : null;
+          };
+          const al30_last  = get(0, 'AL30',  'LA');
+          const al30d_last = get(1, 'AL30D', 'LA');
+          const al30c_last = get(2, 'AL30C', 'LA');
+          if (!al30_last || !al30d_last || !al30c_last) return { ok: false, reason: 'no_last_price' };
+          const today = todayKeyAR();
+          if (lastIntraSaveDate !== today) {
+            await supa(`/intraday_fx_samples?ar_date=neq.${today}`, { method: 'DELETE' });
+          }
+          await supa('/intraday_fx_samples', { method: 'POST', body: {
+            ar_date: today,
+            al30_last, al30d_last, al30c_last,
+          }});
+          lastIntraSaveDate = today;
+          return {
+            ok: true, forced: true, date: today,
+            mep:   +(al30_last  / al30d_last).toFixed(2),
+            ccl:   +(al30_last  / al30c_last).toFixed(2),
+            canje: +(((al30d_last / al30c_last) - 1) * 100).toFixed(2),
+          };
+        })()
+      : await saveIntraFxSample();
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
   }
 });
 
