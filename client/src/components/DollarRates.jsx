@@ -2,6 +2,12 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import FxCalculator from './FxCalculator';
 import SharePriceModal from './SharePriceModal';
 
+// Base URL del API. En dev queda '' (proxy de Vite); en producción tomamos
+// VITE_API_URL del build, igual que el resto del codebase. Si se intenta
+// fetch('/api/...') a path relativo desde un dominio distinto al del server,
+// el browser pega contra el host del client estático y devuelve 404.
+const API_BASE = import.meta.env.VITE_API_URL || '';
+
 // ── Hook: estado del mercado (BYMA — abierto / cerrado) ──
 //
 // Pollea /api/market/status cada 60s para que el badge "MERCADO CERRADO"
@@ -13,7 +19,7 @@ function useMarketStatus(intervalMs = 60_000) {
     let cancelled = false;
     async function load() {
       try {
-        const r = await fetch('/api/market/status');
+        const r = await fetch(`${API_BASE}/api/market/status`);
         if (!r.ok) return;
         const j = await r.json();
         if (!cancelled) setStatus(j);
@@ -43,11 +49,7 @@ function useDolarOficial(intervalMs = 60_000) {
 
     async function load() {
       try {
-       const API_URL = import.meta.env.PROD
-  ? 'https://dg-dashboard-o3yo.onrender.com'
-  : '';
-
-const r = await fetch(`${API_URL}/api/fx/oficial`);
+        const r = await fetch(`${API_BASE}/api/fx/oficial`);
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const json = await r.json();
         if (!cancelled) {
