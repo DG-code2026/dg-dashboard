@@ -48,9 +48,9 @@ const TIMEFRAMES = [
 // para evitar saturar el eje.
 const PANELS = [
   { key: 'mep',   title: 'MEP',   formula: 'AL30 / AL30D',              color: 'var(--neon)', decimals: 2, isPercent: false, yStep: 10 },
-  { key: 'ccl',   title: 'CABLE', formula: 'AL30 / AL30C',              color: '#3b82f6',     decimals: 2, isPercent: false, yStep: 10 },
+  { key: 'ccl',   title: 'CABLE', formula: 'AL30 / AL30C',              color: 'var(--info)', decimals: 2, isPercent: false, yStep: 10 },
   // CANJE en %: (AL30D/AL30C - 1) × 100. Típicamente entre -2% y +2%.
-  { key: 'canje', title: 'CANJE', formula: '(AL30D / AL30C − 1) × 100', color: '#f59e0b',     decimals: 2, isPercent: true,  yStep: 1  },
+  { key: 'canje', title: 'CANJE', formula: '(AL30D / AL30C − 1) × 100', color: 'var(--warn)', decimals: 2, isPercent: true,  yStep: 1  },
 ];
 
 // ─── helpers ───────────────────────────────────────────────────────────────
@@ -270,7 +270,10 @@ export default function RatioIntradayCharts({ connected }) {
     return valid.slice(-wantLast);
   }, [timeframe, intra, hist]);
 
-  const haveData = series.length > 1;
+  // Mostramos contenido en cuanto hay 1 sample. Con 1 sólo punto, first y
+  // last coinciden y los stats colapsan (delta=0, min=max=v0=vN) — todo OK
+  // matemáticamente y la UI lo refleja como "sin movimiento todavía".
+  const haveData = series.length >= 1;
   const first    = haveData ? series[0] : null;
   const last     = haveData ? series[series.length - 1] : null;
 
@@ -336,8 +339,12 @@ export default function RatioIntradayCharts({ connected }) {
 }
 
 function RatioPanel({ title, formula, color, dataKey, decimals, isPercent, yStep, data, stat, timeframe, loading }) {
-  const haveData = Array.isArray(data) && data.length > 1;
-  const isIntra  = timeframe === 'D';
+  // Renderizamos el chart en cuanto haya AL MENOS 1 punto. Una línea de 1
+  // sólo punto no se ve, así que en ese caso forzamos que el `Line` muestre
+  // un dot — ver `dot={singlePoint ? {...} : false}` más abajo.
+  const haveData    = Array.isArray(data) && data.length >= 1;
+  const singlePoint = Array.isArray(data) && data.length === 1;
+  const isIntra     = timeframe === 'D';
 
   // Para DÍA usamos eje X numérico con timestamps + ticks fijos cada 30 min
   // (10:30, 11:00, ..., 17:00) — así queda prolijo y proporcional al horario
@@ -535,7 +542,10 @@ function RatioPanel({ title, formula, color, dataKey, decimals, isPercent, yStep
                 dataKey={dataKey}
                 stroke={color}
                 strokeWidth={1.6}
-                dot={false}
+                /* Con 1 sólo punto la línea no se ve — mostramos un dot para
+                   que haya algo visible. Con 2+ puntos, dots ocultos para que
+                   quede una línea limpia. */
+                dot={singlePoint ? { r: 3.5, fill: color, stroke: color } : false}
                 activeDot={{ r: 3, fill: color, stroke: 'var(--bg-card)', strokeWidth: 1 }}
                 isAnimationActive={false}
               />
@@ -565,12 +575,14 @@ const S = {
   header:    { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, padding: '14px 20px', borderBottom: '1px solid var(--border)', flexWrap: 'wrap' },
   title:     { fontFamily: "'Roboto', sans-serif", fontWeight: 700, fontSize: 12, letterSpacing: 4, color: 'var(--neon)', textShadow: 'var(--neon-glow)', margin: 0 },
   sub:       { fontFamily: "'Roboto Mono', monospace", fontSize: 10, color: 'var(--text-dim)', letterSpacing: 1, marginTop: 4, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
-  discBadge: { padding: '1px 6px', background: 'rgba(245,158,11,0.1)', border: '1px solid rgba(245,158,11,0.3)', color: '#f59e0b', borderRadius: 3, fontWeight: 700 },
+  discBadge: { padding: '1px 6px', background: 'var(--warn-soft)', border: '1px solid var(--warn-border)', color: 'var(--warn)', borderRadius: 3, fontWeight: 700 },
 
   actions:   { display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' },
   tfRow:     { display: 'flex', gap: 0, border: '1px solid var(--border)', borderRadius: 4, overflow: 'hidden' },
   tfBtn:     { background: 'transparent', border: 'none', padding: '6px 12px', fontFamily: "'Roboto Mono', monospace", fontSize: 10, fontWeight: 700, letterSpacing: 1.5, color: 'var(--text-dim)', cursor: 'pointer', transition: 'all 0.15s' },
-  tfBtnActive: { background: 'var(--neon)', color: '#000' },
+  // var(--bg) garantiza contraste sobre el thumb neón en ambos temas
+  // (en dark el neón es claro y bg oscuro; en light al revés).
+  tfBtnActive: { background: 'var(--neon)', color: 'var(--bg)' },
   clearBtn:  { background: 'none', border: '1px solid var(--border)', borderRadius: 3, color: 'var(--text-dim)', fontFamily: "'Roboto Mono', monospace", fontSize: 9, fontWeight: 700, letterSpacing: 1.5, padding: '5px 10px', cursor: 'pointer' },
 
   grid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 16, padding: 16 },
@@ -589,7 +601,7 @@ const S = {
   // en la PNG pero no en la UI normal.
   shareBtn:    { background: 'transparent', border: '1px solid var(--border)', borderRadius: 3, padding: '3px 7px', fontFamily: "'Roboto Mono', monospace", fontSize: 12, fontWeight: 700, color: 'var(--text-dim)', cursor: 'pointer', lineHeight: 1, marginTop: 1, transition: 'all 0.15s' },
   shareBtnOk:  { borderColor: 'var(--neon)', color: 'var(--neon)' },
-  shareBtnErr: { borderColor: '#ef4444', color: '#ef4444' },
+  shareBtnErr: { borderColor: 'var(--red)', color: 'var(--red)' },
   shareLogoRow: { display: 'flex', alignItems: 'center', justifyContent: 'flex-start', paddingBottom: 8, borderBottom: '1px solid var(--border)', marginBottom: 4 },
   shareLogo:    { height: 28, width: 'auto', display: 'block' },
   shareSourceRow: { paddingTop: 8, borderTop: '1px solid var(--border)', marginTop: 4, fontFamily: "'Roboto Mono', monospace", fontSize: 10, fontWeight: 700, letterSpacing: 2, color: 'var(--text-dim)', textAlign: 'right' },

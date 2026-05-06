@@ -623,10 +623,12 @@ function AperturaRow({ cfg, copied, onCopy }) {
 
 // Links de información: herramientas públicas de consulta.
 //  - FCI's: fonditos.ar es el screener público de fondos comunes (rojo).
+//  - ETFs: etf.com es la base de datos pública de ETFs internacionales (celeste).
 const INFO_LINKS = [
   { title: 'CURVAS TASA PESOS · FIJA, CER', url: 'https://breakeven.ar/curvas' },
   { title: 'BOND TERMINAL',                 url: 'https://bondterminal.com/' },
-  { title: "FCI's",                         url: 'https://fonditos.ar/', color: '#EF4444' },
+  { title: "FCI's",                         url: 'https://fonditos.ar/',     color: '#EF4444' },
+  { title: 'ETFs',                          url: 'https://www.etf.com/tools', color: '#0EA5E9' },
 ];
 
 // Links de gestión: backends operativos de brokers + recursos. Cada uno con su
@@ -863,7 +865,7 @@ function DiasHabilesCard() {
           <span style={S.dhStatLabel}>FINDES</span>
         </div>
         <div style={S.dhStatItem}>
-          <span style={{ ...S.dhStatValue, color: '#ef4444' }}>{info.holidayCount}</span>
+          <span style={{ ...S.dhStatValue, color: 'var(--red)' }}>{info.holidayCount}</span>
           <span style={S.dhStatLabel}>FERIADOS</span>
         </div>
       </div>
@@ -908,12 +910,20 @@ function DiasHabilesCard() {
 
 // ─── Estilos ───
 const S = {
-  // Grilla 2×2. `minmax(0, ...)` evita que el contenido fuerce overflow horizontal.
+  // Grilla del Home: SIEMPRE 2 cols como máximo (nunca 3 en una fila).
+  // El truco: cada columna tiene un minWidth de "max(360px, half-row)". Si
+  // el viewport es ≥720px, half-row > 360px → cada col se reserva ≥half-row
+  // → sólo entran 2. Si el viewport es <720px, half-row < 360px → cada col
+  // necesita ≥360px → entra 1 sola.
+  // Usamos 64px (gap máximo del clamp) en el calc para garantizar 2 cols
+  // siempre que deban entrar (caso conservador).
+  // El gap crece con clamp(16px, 3vw, 64px): en monitores grandes la
+  // separación entre cards aumenta en lugar de hacerlas inmensas.
   grid: {
     display: 'grid',
-    gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(max(min(360px, 100%), calc((100% - 64px) / 2)), 1fr))',
     gridAutoRows: 'minmax(360px, auto)',
-    gap: 16,
+    gap: 'clamp(16px, 3vw, 64px)',
   },
 
   // Cada card
@@ -947,7 +957,7 @@ const S = {
   ts: { fontFamily: "'Roboto Mono',monospace", fontSize: 9, color: 'var(--text-dim)', letterSpacing: 1 },
   refreshBtn: { background: 'none', border: '1px solid var(--border)', borderRadius: 3, color: 'var(--neon-dim)', fontSize: 13, padding: '2px 8px', cursor: 'pointer' },
 
-  errBox: { background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.3)', borderRadius: 3, padding: '6px 10px', marginBottom: 10, color: '#ef4444', fontFamily: "'Roboto Mono',monospace", fontSize: 10 },
+  errBox: { background: 'var(--red-soft)', border: '1px solid var(--red-border)', borderRadius: 3, padding: '6px 10px', marginBottom: 10, color: 'var(--red)', fontFamily: "'Roboto Mono',monospace", fontSize: 10 },
 
   // ── Botones de navegación del calendario ──
   navBtn: {
@@ -1292,7 +1302,7 @@ const S = {
   },
   dhFeriadoDay: {
     fontFamily: "'Roboto Mono', monospace",
-    fontSize: 14, fontWeight: 700, color: '#ef4444', lineHeight: 1,
+    fontSize: 14, fontWeight: 700, color: 'var(--red)', lineHeight: 1,
   },
   dhFeriadoDow: {
     fontFamily: "'Roboto Mono', monospace",
@@ -1317,10 +1327,10 @@ const S = {
   dhWarning: {
     marginTop: 6,
     padding: '6px 8px',
-    background: 'rgba(245,158,11,0.08)',
-    border: '1px solid rgba(245,158,11,0.3)',
+    background: 'var(--warn-soft)',
+    border: '1px solid var(--warn-border)',
     borderRadius: 3,
     fontFamily: "'Roboto Mono', monospace",
-    fontSize: 9, color: '#f59e0b', letterSpacing: 0.5, lineHeight: 1.5,
+    fontSize: 9, color: 'var(--warn)', letterSpacing: 0.5, lineHeight: 1.5,
   },
 };

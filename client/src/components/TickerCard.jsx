@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 
-export default function TickerCard({ ticker, label, data, delay }) {
+export default function TickerCard({ ticker, label, data, marketOpen, delay }) {
   const [flash, setFlash] = useState(null); // 'bid' | 'offer' | null
   const prevData = useRef(null);
 
@@ -39,10 +39,24 @@ export default function TickerCard({ ticker, label, data, delay }) {
   const bidSize   = getBidSize(data);
   const offerSize = getOfferSize(data);
 
-  const hasLive    = liveBid !== null || liveOffer !== null;
-  const hasAnyData = bid !== null || offer !== null;
-  const usingClose = !hasLive && hasAnyData;
-  const spread     = liveBid != null && liveOffer != null ? (liveOffer - liveBid).toFixed(2) : null;
+  // Antes el badge LIVE se decidía sólo por la presencia de bid/offer en
+  // `latestData`. Pero después de la corrección del merge en useMarketData,
+  // los BI/OF persisten en cache aunque el mercado esté cerrado — entonces
+  // se mostraba "LIVE" indefinidamente. Ahora respetamos el estado real del
+  // mercado: si está cerrado, NUNCA es LIVE (a lo sumo CIERRE).
+  const hasAnyData    = bid !== null || offer !== null;
+  const hasLiveBookOK = liveBid !== null || liveOffer !== null;
+  // `marketOpen` puede ser undefined la primera vez (status aún no cargó).
+  // Con undefined respetamos el comportamiento legacy (LIVE si hay book).
+  const isMarketOpen  = marketOpen !== false;
+  const hasLive       = isMarketOpen && hasLiveBookOK;
+  const usingClose    = !hasLive && hasAnyData;
+  const spread        = isMarketOpen && liveBid != null && liveOffer != null
+    ? (liveOffer - liveBid).toFixed(2)
+    : null;
+
+  const badgeColor = hasLive ? 'var(--green)' : (usingClose ? '#f59e0b' : 'var(--text-dim)');
+  const badgeLabel = hasLive ? 'LIVE' : (usingClose ? 'CIERRE' : 'SIN DATOS');
 
   return (
     <div
@@ -51,89 +65,57 @@ export default function TickerCard({ ticker, label, data, delay }) {
         animationDelay: `${delay}ms`,
       }}
     >
-      {/* Header */}
+      {/* Header compacto: ticker + label a la izq, badge a la der */}
       <div style={styles.cardHeader}>
-        <div>
+        <div style={styles.titleGroup}>
           <span style={styles.ticker}>{ticker}</span>
           <span style={styles.label}>{label}</span>
         </div>
         <div style={styles.liveIndicator}>
-          {/* 3 estados: LIVE (punta real) · CIERRE (sólo CL, mercado cerrado) · SIN DATOS */}
-          <div
-            style={{
-              ...styles.liveDot,
-              backgroundColor: hasLive ? 'var(--green)' : (usingClose ? '#f59e0b' : 'var(--text-dim)'),
-              boxShadow: hasLive ? 'var(--green-glow)' : 'none',
-            }}
-          />
-          <span style={{
-            ...styles.liveText,
-            color: hasLive ? 'var(--green)' : (usingClose ? '#f59e0b' : 'var(--text-dim)'),
-          }}>
-            {hasLive ? 'LIVE' : (usingClose ? 'CIERRE' : 'SIN DATOS')}
-          </span>
+          <div style={{
+            ...styles.liveDot,
+            backgroundColor: badgeColor,
+            boxShadow: hasLive ? 'var(--green-glow)' : 'none',
+          }} />
+          <span style={{ ...styles.liveText, color: badgeColor }}>{badgeLabel}</span>
         </div>
       </div>
 
-      {/* Bid / Offer */}
+      {/* Bid / Offer (compactos, sin spread separado) */}
       <div style={styles.priceRow}>
-        {/* BID */}
-        <div
-          style={{
-            ...styles.priceBox,
-            borderColor: flash === 'bid' ? 'var(--green)' : 'var(--border)',
-            boxShadow: flash === 'bid' ? 'var(--green-glow)' : 'none',
-            transition: 'all 0.3s ease',
-          }}
-        >
+        <div style={{
+          ...styles.priceBox,
+          borderColor: flash === 'bid' ? 'var(--green)' : 'var(--border)',
+          boxShadow: flash === 'bid' ? 'var(--green-glow)' : 'none',
+        }}>
           <span style={{ ...styles.priceLabel, color: 'var(--green)' }}>BID</span>
           <span style={{ ...styles.priceValue, color: 'var(--green)' }}>
             {bid !== null ? formatPrice(bid) : '—'}
           </span>
-          {bidSize !== null && (
-            <span style={styles.sizeText}>{formatSize(bidSize)} nom.</span>
-          )}
         </div>
 
-        {/* Spread */}
-        <div style={styles.spreadCol}>
-          <span style={styles.spreadLabel}>SPREAD</span>
-          <span style={styles.spreadValue}>{spread ?? '—'}</span>
-        </div>
-
-        {/* OFFER */}
-        <div
-          style={{
-            ...styles.priceBox,
-            borderColor: flash === 'offer' ? 'var(--red)' : 'var(--border)',
-            boxShadow: flash === 'offer' ? '0 0 8px var(--red-dim)' : 'none',
-            transition: 'all 0.3s ease',
-          }}
-        >
+        <div style={{
+          ...styles.priceBox,
+          borderColor: flash === 'offer' ? 'var(--red)' : 'var(--border)',
+          boxShadow: flash === 'offer' ? '0 0 8px var(--red-dim)' : 'none',
+        }}>
           <span style={{ ...styles.priceLabel, color: 'var(--red)' }}>OFFER</span>
           <span style={{ ...styles.priceValue, color: 'var(--red)' }}>
             {offer !== null ? formatPrice(offer) : '—'}
           </span>
-          {offerSize !== null && (
-            <span style={styles.sizeText}>{formatSize(offerSize)} nom.</span>
-          )}
         </div>
       </div>
 
-      {/* Last price footer */}
-      {last !== null && (
-        <div style={styles.lastRow}>
-          <span style={styles.lastLabel}>Último</span>
-          <span style={styles.lastValue}>{formatPrice(last)}</span>
-        </div>
-      )}
-
-      {/* Timestamp */}
-      {data?.timestamp && (
-        <div style={styles.tsRow}>
-          <span style={styles.tsText}>
-            Actualizado: {new Date(data.timestamp).toLocaleTimeString('es-AR')}
-          </span>
+      {/* Footer en una sola línea: spread · último · hora */}
+      {(spread != null || last != null || data?.timestamp) && (
+        <div style={styles.metaRow}>
+          {spread != null && <span><span style={styles.metaLabel}>Sp</span> {spread}</span>}
+          {last != null    && <span><span style={styles.metaLabel}>Últ</span> {formatPrice(last)}</span>}
+          {data?.timestamp && (
+            <span style={{ marginLeft: 'auto' }}>
+              {new Date(data.timestamp).toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' })}
+            </span>
+          )}
         </div>
       )}
     </div>
@@ -200,38 +182,55 @@ function formatSize(s) {
 // ── Styles ──
 
 const styles = {
+  // Card compacta: misma info que antes pero ~50% más chica vertical.
+  // El padding pasa de 20×24 a 10×12, los bid/offer dejan de tener su propio
+  // box gigante (ahora son chips planos), y el footer condensa "Sp · Últ ·
+  // hora" en una sola línea.
   card: {
     background: 'var(--bg-card)',
     border: '1px solid var(--border)',
-    borderRadius: 8,
-    padding: '20px 24px',
+    borderRadius: 6,
+    padding: '10px 12px',
     animation: 'fade-in 0.5s ease forwards',
     opacity: 0,
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 8,
   },
   cardHeader: {
     display: 'flex',
     justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    marginBottom: 20,
+    alignItems: 'center',
+    gap: 8,
+  },
+  titleGroup: {
+    display: 'flex',
+    alignItems: 'baseline',
+    gap: 6,
+    minWidth: 0,
   },
   ticker: {
     fontFamily: "'Roboto Mono', monospace",
     fontWeight: 700,
-    fontSize: 20,
+    fontSize: 15,
     color: 'var(--neon)',
     textShadow: '0 0 6px #39ff1440',
-    marginRight: 10,
+    letterSpacing: 0.5,
   },
   label: {
-    fontSize: 12,
+    fontSize: 10,
     color: 'var(--text-dim)',
     fontWeight: 300,
     letterSpacing: 0.5,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
   },
   liveIndicator: {
     display: 'flex',
     alignItems: 'center',
-    gap: 6,
+    gap: 5,
+    flexShrink: 0,
   },
   liveDot: {
     width: 6,
@@ -241,90 +240,55 @@ const styles = {
   },
   liveText: {
     fontFamily: "'Roboto Mono', monospace",
-    fontSize: 10,
-    letterSpacing: 2,
-    fontWeight: 500,
+    fontSize: 9,
+    letterSpacing: 1.5,
+    fontWeight: 700,
   },
   priceRow: {
     display: 'flex',
     alignItems: 'stretch',
-    gap: 12,
+    gap: 6,
   },
   priceBox: {
     flex: 1,
     border: '1px solid var(--border)',
-    borderRadius: 6,
-    padding: '14px 16px',
+    borderRadius: 4,
+    padding: '6px 8px',
     display: 'flex',
     flexDirection: 'column',
     alignItems: 'center',
-    gap: 4,
-    background: '#0d0d0d',
+    gap: 2,
+    background: 'var(--input-bg, #0d0d0d)',
+    transition: 'all 0.3s ease',
   },
   priceLabel: {
     fontFamily: "'Roboto Mono', monospace",
-    fontSize: 10,
-    fontWeight: 500,
-    letterSpacing: 3,
-    color: 'var(--neon)',
+    fontSize: 8,
+    fontWeight: 700,
+    letterSpacing: 2,
   },
   priceValue: {
     fontFamily: "'Roboto Mono', monospace",
-    fontSize: 22,
+    fontSize: 16,
     fontWeight: 700,
-    color: 'var(--neon)',
+    lineHeight: 1.1,
   },
-  sizeText: {
+  // Footer: "Sp 0.44 · Últ 1234.78 · 16:42" en una sola línea
+  metaRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 10,
+    paddingTop: 4,
+    borderTop: '1px solid var(--border)',
     fontFamily: "'Roboto Mono', monospace",
     fontSize: 10,
     color: 'var(--text-dim)',
+    flexWrap: 'wrap',
   },
-  spreadCol: {
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 2,
-    minWidth: 56,
-  },
-  spreadLabel: {
-    fontFamily: "'Roboto Mono', monospace",
-    fontSize: 8,
-    letterSpacing: 2,
+  metaLabel: {
     color: 'var(--text-dim)',
-  },
-  spreadValue: {
-    fontFamily: "'Roboto Mono', monospace",
-    fontSize: 13,
-    fontWeight: 500,
-    color: 'var(--text-dim)',
-  },
-  lastRow: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginTop: 14,
-    paddingTop: 10,
-    borderTop: '1px solid var(--border)',
-  },
-  lastLabel: {
-    fontSize: 11,
-    color: 'var(--text-dim)',
-    letterSpacing: 1,
-  },
-  lastValue: {
-    fontFamily: "'Roboto Mono', monospace",
-    fontSize: 14,
-    fontWeight: 500,
-    color: 'var(--text)',
-  },
-  tsRow: {
-    marginTop: 8,
-    textAlign: 'right',
-  },
-  tsText: {
-    fontFamily: "'Roboto Mono', monospace",
-    fontSize: 9,
-    color: 'var(--text-dim)',
+    opacity: 0.55,
+    marginRight: 3,
+    letterSpacing: 0.5,
   },
 };

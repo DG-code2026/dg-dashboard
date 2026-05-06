@@ -27,15 +27,68 @@ function FlyerModal({data,columns,tirMin,tirMax,lastUpdate,onClose,title}){
   useEffect(()=>{const obs=new MutationObserver(()=>setTheme(document.documentElement.getAttribute('data-theme')||'dark'));obs.observe(document.documentElement,{attributes:true,attributeFilter:['data-theme']});return()=>obs.disconnect();},[]);
   const logoSrc=theme==='dark'?'/logos/DG%20tema%20oscuro.png':'/logos/DG-tema-claro.svg';
   const vis=columns.filter(c=>visCols.includes(c.key));
-  const cap=async a=>{setDl(true);try{const h2c=await loadH2C();await new Promise(r=>setTimeout(r,50));const canvas=await h2c(ref.current,{backgroundColor:getComputedStyle(document.documentElement).getPropertyValue('--bg').trim()||'#0a0a0a',scale:2,useCORS:true,logging:false});if(a==='download'){const l=document.createElement('a');l.download=`${title.toLowerCase().replace(/\s+/g,'-')}-${new Date().toISOString().slice(0,10)}.png`;l.href=canvas.toDataURL('image/png');l.click();}else canvas.toBlob(b=>{if(b)navigator.clipboard.write([new ClipboardItem({'image/png':b})]);});}catch(e){alert(e.message);}finally{setDl(false);}};
-  return(<div style={S.flyerOverlay} onClick={e=>e.target===e.currentTarget&&onClose()}><div style={{width:'100%',maxWidth:1200}}>
-    <div style={S.flyerControls}><div style={{display:'flex',gap:6,flexWrap:'wrap',flex:1}}>{columns.map(c=><label key={c.key} style={S.flyerCheck}><input type="checkbox" checked={visCols.includes(c.key)} onChange={()=>setVisCols(p=>p.includes(c.key)?p.filter(x=>x!==c.key):[...p,c.key])} style={{marginRight:4}}/><span style={{fontSize:9,letterSpacing:1}}>{c.label}</span></label>)}</div><div style={{display:'flex',gap:8}}><button style={S.flyerBtn} onClick={()=>cap('download')} disabled={dl}>{dl?'...':'⬇ Descargar'}</button><button style={S.flyerBtn} onClick={()=>cap('copy')} disabled={dl}>{dl?'...':'📋 Copiar'}</button><button style={{...S.flyerBtn,color:'var(--red)'}} onClick={onClose}>✕</button></div></div>
-    <div ref={ref} style={{background:'var(--bg)',borderRadius:8,overflow:'hidden',border:'1px solid var(--border)'}}>
-      <div style={{padding:'24px 24px 16px',borderBottom:'2px solid var(--neon)'}}><div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:20,flexWrap:'wrap'}}><img src={logoSrc} alt="Delfino Gaviña" crossOrigin="anonymous" style={{height:48,width:'auto',display:'block',flexShrink:0}}/><div style={{fontFamily:"'Roboto Mono',monospace",fontSize:11,color:'var(--text-dim)'}}>{new Date().toLocaleDateString('es-AR',{day:'2-digit',month:'long',year:'numeric'})}</div></div><div style={{fontWeight:900,fontSize:18,letterSpacing:6,color:'var(--neon)',textAlign:'center',marginTop:14}}>{title}</div></div>
-      <table style={{width:'100%',borderCollapse:'collapse',fontFamily:"'Roboto Mono',monospace",fontSize:11}}><thead><tr>{vis.map(c=><th key={c.key} style={S.flyerTh}>{c.label}</th>)}</tr></thead><tbody>{data.map((row,ri)=><tr key={row.ticker} style={{background:ri%2===0?'var(--row-alt)':'transparent'}}>{vis.map(col=>{const v=row[col.key];return<td key={col.key} style={{...S.flyerTd,background:col.isTir?tirBg(v,tirMin,tirMax):'transparent',color:col.dynamic?'var(--neon)':'var(--text)',fontWeight:col.key==='ticker'||col.dynamic||col.isTir?700:400}}>{col.editable?(row.law||'—'):col.fmt(v)}</td>;})}</tr>)}</tbody></table>
-      <div style={{display:'flex',justifyContent:'space-between',padding:'12px 24px',borderTop:'1px solid var(--border)',fontFamily:"'Roboto Mono',monospace",fontSize:9,color:'var(--text-dim)'}}><span>Fuente: Portfolio Personal Inversiones (PPI) · API REST · A-24HS</span><span>{lastUpdate?`Actualizado: ${lastUpdate.toLocaleString('es-AR',{dateStyle:'medium',timeStyle:'short'})}`:''}</span></div>
+
+  // Capturamos el DIV (`ref`) con TODO su contenido natural — incluso si el
+  // viewport es más chico (caso mobile). Para que html2canvas no recorte:
+  //  1. Forzamos al ref a su scrollWidth (+ overflow visible) antes del shot.
+  //  2. Pasamos windowWidth/Height al canvas para que renderice como si el
+  //     viewport fuera del tamaño natural del flyer (sin clipping).
+  //  3. Restauramos los estilos originales.
+  const cap=async a=>{
+    setDl(true);
+    const el=ref.current;
+    if(!el){setDl(false);return;}
+    const prevWidth=el.style.width;
+    const prevMaxWidth=el.style.maxWidth;
+    const prevOverflow=el.style.overflow;
+    try{
+      const h2c=await loadH2C();
+      // Snapshot del ancho natural del contenido (incluye scroll horizontal).
+      const naturalW=Math.max(el.scrollWidth,el.offsetWidth);
+      // Forzar layout completo durante la captura.
+      el.style.width=naturalW+'px';
+      el.style.maxWidth=naturalW+'px';
+      el.style.overflow='visible';
+      // 2 frames para que el browser re-layoutee con el width forzado.
+      await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+      const canvas=await h2c(el,{
+        backgroundColor:getComputedStyle(document.documentElement).getPropertyValue('--bg').trim()||'#0a0a0a',
+        scale:2,
+        useCORS:true,
+        logging:false,
+        // windowWidth/Height >= naturalW garantiza que html2canvas no recorte
+        // por viewport (importante en mobile donde el viewport es 380px y la
+        // grilla puede ser 800px+).
+        windowWidth:Math.max(naturalW,window.innerWidth),
+        windowHeight:Math.max(el.scrollHeight,window.innerHeight),
+      });
+      if(a==='download'){const l=document.createElement('a');l.download=`${title.toLowerCase().replace(/\s+/g,'-')}-${new Date().toISOString().slice(0,10)}.png`;l.href=canvas.toDataURL('image/png');l.click();}
+      else canvas.toBlob(b=>{if(b&&navigator.clipboard?.write&&typeof window.ClipboardItem!=='undefined')navigator.clipboard.write([new ClipboardItem({'image/png':b})]);});
+    }catch(e){alert(e.message);}
+    finally{
+      // Restaurar estilos originales sí o sí.
+      el.style.width=prevWidth;
+      el.style.maxWidth=prevMaxWidth;
+      el.style.overflow=prevOverflow;
+      setDl(false);
+    }
+  };
+
+  return(<div style={S.flyerOverlay} onClick={e=>e.target===e.currentTarget&&onClose()}>
+    <div style={{width:'100%',maxWidth:1200}}>
+      <div style={S.flyerControls}><div style={{display:'flex',gap:6,flexWrap:'wrap',flex:1}}>{columns.map(c=><label key={c.key} style={S.flyerCheck}><input type="checkbox" checked={visCols.includes(c.key)} onChange={()=>setVisCols(p=>p.includes(c.key)?p.filter(x=>x!==c.key):[...p,c.key])} style={{marginRight:4}}/><span style={{fontSize:9,letterSpacing:1}}>{c.label}</span></label>)}</div><div style={{display:'flex',gap:8}}><button style={S.flyerBtn} onClick={()=>cap('download')} disabled={dl}>{dl?'...':'⬇ Descargar'}</button><button style={S.flyerBtn} onClick={()=>cap('copy')} disabled={dl}>{dl?'...':'📋 Copiar'}</button><button style={{...S.flyerBtn,color:'var(--red)'}} onClick={onClose}>✕</button></div></div>
+      {/* Wrapper con scroll horizontal — permite preview completo en mobile.
+          El elemento `ref` adentro queda con su ancho natural; cuando el
+          viewport es más chico, el wrapper externo permite swipe lateral. */}
+      <div className="flyer-scroll" style={{overflowX:'auto',overflowY:'hidden',WebkitOverflowScrolling:'touch'}}>
+        <div ref={ref} style={{background:'var(--bg)',borderRadius:8,border:'1px solid var(--border)',width:'max-content',minWidth:'100%'}}>
+          <div style={{padding:'24px 24px 16px',borderBottom:'2px solid var(--neon)'}}><div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:20,flexWrap:'wrap'}}><img src={logoSrc} alt="Delfino Gaviña" crossOrigin="anonymous" style={{height:48,width:'auto',display:'block',flexShrink:0}}/><div style={{fontFamily:"'Roboto Mono',monospace",fontSize:11,color:'var(--text-dim)'}}>{new Date().toLocaleDateString('es-AR',{day:'2-digit',month:'long',year:'numeric'})}</div></div><div style={{fontWeight:900,fontSize:18,letterSpacing:6,color:'var(--neon)',textAlign:'center',marginTop:14}}>{title}</div></div>
+          <table style={{width:'100%',borderCollapse:'collapse',fontFamily:"'Roboto Mono',monospace",fontSize:11}}><thead><tr>{vis.map(c=><th key={c.key} style={S.flyerTh}>{c.label}</th>)}</tr></thead><tbody>{data.map((row,ri)=><tr key={row.ticker} style={{background:ri%2===0?'var(--row-alt)':'transparent'}}>{vis.map(col=>{const v=row[col.key];const varColor=col.isVar?(v==null||Math.abs(v)<0.005?'var(--text-dim)':(v>0?'var(--green)':'var(--red)')):null;return<td key={col.key} style={{...S.flyerTd,background:col.isTir?tirBg(v,tirMin,tirMax):'transparent',color:varColor||(col.dynamic?'var(--neon)':'var(--text)'),fontWeight:col.key==='ticker'||col.dynamic||col.isTir||col.isVar?700:400}}>{col.editable?(row.law||'—'):col.fmt(v)}</td>;})}</tr>)}</tbody></table>
+          <div style={{display:'flex',justifyContent:'space-between',padding:'12px 24px',borderTop:'1px solid var(--border)',fontFamily:"'Roboto Mono',monospace",fontSize:9,color:'var(--text-dim)'}}><span>Fuente: Portfolio Personal Inversiones (PPI) · API REST · A-24HS</span><span>{lastUpdate?`Actualizado: ${lastUpdate.toLocaleString('es-AR',{dateStyle:'medium',timeStyle:'short'})}`:''}</span></div>
+        </div>
+      </div>
     </div>
-  </div></div>);
+  </div>);
 }
 
 // ══════════════════════════════════════════════
@@ -53,6 +106,11 @@ export default function BondPage({ config }) {
     if (showPaymentMonths) cols.paymentMonths = {label:'Meses Corte',defW:110,fmt:v=>v||'—'};
     Object.assign(cols, {
       price:{label:'Px (MEP)',defW:90,fmt:v=>v!=null?`$${Number(v).toFixed(2)}`:'—',dynamic:true},
+      // VAR diaria — variación porcentual del precio actual vs apertura del
+      // día. Se pinta de verde (positiva) o rojo (negativa). PPI provee
+      // openingPrice en MarketData/Current; el server lo computa y manda
+      // en `dailyVar` (en %). Usamos isVar para gatillar el color en render.
+      dailyVar:{label:'Var %',defW:75,fmt:v=>v!=null?`${v>=0?'+':''}${Number(v).toFixed(2)}%`:'—',isVar:true},
       law:{label:'LEY',defW:65,fmt:v=>v||'—',editable:true},
       minimalSheet:{label:'Lámina',defW:82,fmt:v=>v||'—'},
       isin:{label:'ISIN',defW:140,fmt:v=>v||'—',copyable:true},
@@ -75,8 +133,28 @@ export default function BondPage({ config }) {
 
   useEffect(()=>{inputRef.current?.focus();},[]);
 
-  // Load from DB
-  useEffect(()=>{(async()=>{try{const[fr,sr]=await Promise.all([fetch(`${API}/api/db/${dbRoute}`),fetch(`${API}/api/db/settings`)]);const favs=await fr.json();const settings=await sr.json();if(Array.isArray(favs))setDbFavs(favs);if(Array.isArray(settings[settingsKey])&&settings[settingsKey].length)setColOrder(settings[settingsKey]);const wk=settingsKey+'_widths';if(settings[wk]&&typeof settings[wk]==='object'&&Object.keys(settings[wk]).length)setColWidths(p=>({...p,...settings[wk]}));}catch(e){console.error('DB load:',e);}})();},[dbRoute,settingsKey]);
+  // Load from DB.
+  // IMPORTANTE: si el `colOrder` guardado en BDD es de antes de que
+  // existieran ciertas columnas (ej. `dailyVar` que se añadió después),
+  // appendeamos las columnas nuevas al final para que aparezcan sí o sí.
+  // Sin esto, una columna agregada en código no se veía hasta que el
+  // usuario reseteara settings.
+  useEffect(()=>{(async()=>{try{
+    const[fr,sr]=await Promise.all([fetch(`${API}/api/db/${dbRoute}`),fetch(`${API}/api/db/settings`)]);
+    const favs=await fr.json();const settings=await sr.json();
+    if(Array.isArray(favs))setDbFavs(favs);
+    if(Array.isArray(settings[settingsKey])&&settings[settingsKey].length){
+      const saved=settings[settingsKey].filter(k=>DEF_ORDER.includes(k));
+      const missing=DEF_ORDER.filter(k=>!saved.includes(k));
+      const merged=missing.length?[...saved,...missing]:saved;
+      setColOrder(merged);
+      // Si hubo cambios (nuevas cols agregadas), persistimos el nuevo
+      // orden así no tenemos que hacer este merge cada vez.
+      if(missing.length)saveSetting(settingsKey,merged);
+    }
+    const wk=settingsKey+'_widths';
+    if(settings[wk]&&typeof settings[wk]==='object'&&Object.keys(settings[wk]).length)setColWidths(p=>({...p,...settings[wk]}));
+  }catch(e){console.error('DB load:',e);}})();},[dbRoute,settingsKey]);
 
   // Save settings (debounced)
   const saveTimer=useRef(null);
@@ -108,7 +186,10 @@ export default function BondPage({ config }) {
     if(!tickers.length){setFavData([]);return;}
     setFavLoading(true);
     try{const res=await fetch(`${API}/api/ppi/bonds/batch?type=${apiType}&settlement=${settlement}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tickers})});const data=await res.json();const rawBonds={};const dbMap={};(freshFavs||[]).forEach(f=>{dbMap[f.ticker]=f;});
-    const rows=data.filter(d=>!d.error&&d.bond).map(d=>{rawBonds[d.ticker]=d.bond;const db=dbMap[d.ticker]||{};const row={ticker:d.ticker,price:d.price,tir:d.bond.tir,md:d.bond.md,issuer:d.bond.issuer,coupon:extractCoupon(d.bond.interests),expirationDate:d.bond.expirationDate,law:db.ley||d.bond.law||'',minimalSheet:d.bond.minimalSheet,isin:d.bond.isin};if(showPaymentMonths)row.paymentMonths=extractMonths(d.bond.flows);return row;});
+    // dailyVar = variación vs cierre anterior (estándar de mercado).
+    // El server expone también `dailyVar` (vs opening) por si se quiere
+    // alternar; acá usamos `dailyVarPrevClose` por pedido del usuario.
+    const rows=data.filter(d=>!d.error&&d.bond).map(d=>{rawBonds[d.ticker]=d.bond;const db=dbMap[d.ticker]||{};const row={ticker:d.ticker,price:d.price,dailyVar:d.dailyVarPrevClose,tir:d.bond.tir,md:d.bond.md,issuer:d.bond.issuer,coupon:extractCoupon(d.bond.interests),expirationDate:d.bond.expirationDate,law:db.ley||d.bond.law||'',minimalSheet:d.bond.minimalSheet,isin:d.bond.isin};if(showPaymentMonths)row.paymentMonths=extractMonths(d.bond.flows);return row;});
     setFavRawBonds(rawBonds);setFavData(rows);setFavLastUpdate(new Date());setCountdown(60);}catch(e){console.error('Fav fetch:',e);}finally{setFavLoading(false);}
   },[dbRoute,apiType,settlement,showPaymentMonths]);
 
@@ -188,6 +269,11 @@ export default function BondPage({ config }) {
                     if(col.editable)return<td key={col.key} style={{...S.td,textAlign:'center',borderRight:br}} onClick={e=>e.stopPropagation()}><input style={S.lawInput} value={row.law||''} onChange={e=>updateLaw(row.ticker,e.target.value.toUpperCase())} placeholder="—" maxLength={10}/></td>;
                     if(col.copyable)return<td key={col.key} style={{...S.td,textAlign:'center',borderRight:br}} onClick={e=>e.stopPropagation()}><span style={{fontSize:10}}>{v||'—'}</span>{v&&<button style={S.copyBtn} onClick={()=>handleCopyIsin(v)}>{copiedIsin===v?'✓':'⧉'}</button>}</td>;
                     if(col.isTir)return<td key={col.key} style={{...S.td,textAlign:'center',background:tirBg(v,tirMin,tirMax),fontWeight:700,borderRight:br}}>{col.fmt(v)}</td>;
+                    // Variación diaria: verde si >0, rojo si <0, gris si
+                    // efectivamente 0 (o rounded a 0.00%). El threshold
+                    // 0.005 captura cualquier valor que se mostraría como
+                    // "+0.00%" o "-0.00%" tras toFixed(2).
+                    if(col.isVar){const c=v==null||Math.abs(v)<0.005?'var(--text-dim)':(v>0?'var(--green)':'var(--red)');return<td key={col.key} style={{...S.td,textAlign:'center',color:c,fontWeight:700,borderRight:br}}>{col.fmt(v)}</td>;}
                     return<td key={col.key} style={{...S.td,textAlign:'center',color:col.dynamic?'var(--neon)':'var(--text)',fontWeight:col.key==='ticker'||col.dynamic?700:400,borderRight:br}}>{col.fmt(v)}</td>;
                   })}
                 </tr>

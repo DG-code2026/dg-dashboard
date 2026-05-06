@@ -484,12 +484,33 @@ async function fetchBondWithCache(ticker, instrumentType, settlement) {
   if (cached) return cached;
 
   const md = await ppiFetch(`/api/${PPI_V}/MarketData/Current?${new URLSearchParams({ Ticker: ticker, Type: instrumentType, Settlement: settlement })}`, { headers: ppiH() });
-  const price = md.data?.price;
+  const data = md.data || {};
+  const price = data.price;
   if (!price) { const r = { ticker, error: 'No price' }; return r; }
 
   const be = await ppiFetch(`/api/${PPI_V}/MarketData/Bonds/Estimate?${new URLSearchParams({ Ticker: ticker, Date: new Date().toISOString(), QuantityType: 'PAPELES', Quantity: '100', AmountOfMoney: '0', Price: String(price), ExchangeRate: '1', EquityRate: '0', ExchangeRateAmortization: '0', RateAdjustmentAmortization: '0' })}`, { headers: ppiH() });
   const bond = Array.isArray(be.data) ? be.data[0] : be.data;
-  const result = { ticker, price, bond };
+
+  // Variación diaria. PPI devuelve `marketChangePercent` como string ("-0.49%")
+  // comparando contra `previousClose`. El usuario pidió comparar contra el
+  // OPENING, así que computamos también esa variante. Exponemos ambas y que
+  // el cliente elija (default UI: vs opening, según pedido).
+  const opening = Number(data.openingPrice);
+  const prevClose = Number(data.previousClose);
+  const dailyVarOpenPct = Number.isFinite(opening) && opening > 0
+    ? ((price - opening) / opening) * 100
+    : null;
+  const dailyVarPrevClosePct = Number.isFinite(prevClose) && prevClose > 0
+    ? ((price - prevClose) / prevClose) * 100
+    : null;
+
+  const result = {
+    ticker, price, bond,
+    openingPrice:        Number.isFinite(opening) ? opening : null,
+    previousClose:       Number.isFinite(prevClose) ? prevClose : null,
+    dailyVar:            dailyVarOpenPct,        // vs apertura (lo que pidió el user)
+    dailyVarPrevClose:   dailyVarPrevClosePct,   // vs cierre anterior (estándar de mercado)
+  };
   setCache(cacheKey, result);
   return result;
 }
@@ -1253,17 +1274,21 @@ async function saveDailyFxClose(reason = 'manual') {
     }
 
     const today = todayKeyAR();
+    // Bid/offer ya no se almacenan (son parte del book momentáneo, no del cierre).
+    // Los seguimos usando *transitoriamente* para computar mep_compra/venta y
+    // ccl_compra/venta — buy-side al offer, sell-side al bid — pero sólo el
+    // resultado calculado (y los CL) van a parar a la fila.
     const row = {
       date: today,
-      al30_bid: al30b, al30_offer: al30o, al30_close: al30c,
-      al30d_bid: al30db, al30d_offer: al30do, al30d_close: al30dc,
-      al30c_bid: al30cb, al30c_offer: al30co, al30c_close: al30cc,
-      mep_compra: al30o / al30db,
-      mep_venta: al30b / al30do,
-      ccl_compra: al30o / al30cb,
-      ccl_venta: al30b / al30co,
+      al30_close:  al30c,
+      al30d_close: al30dc,
+      al30c_close: al30cc,
+      mep_compra:   al30o  / al30db,
+      mep_venta:    al30b  / al30do,
+      ccl_compra:   al30o  / al30cb,
+      ccl_venta:    al30b  / al30co,
       canje_compra: (al30cb / al30do) - 1,
-      canje_venta: (al30db / al30co) - 1,
+      canje_venta:  (al30db / al30co) - 1,
     };
 
     // Upsert (insert or patch si la fecha ya existe).
@@ -1337,6 +1362,13 @@ app.get('/api/fx/history', async (req, res) => {
 const INTRA_SAMPLE_INTERVAL_MS = 5 * 60_000; // 5 min
 let lastIntraSaveDate = null;
 
+// Backoff por rate limit de Primary REST. Cuando recibimos 429, dejamos de
+// llamar a REST por 1 hora — durante ese tiempo el sampler usa solamente
+// el cache del WebSocket (que ya tiene LA en tiempo real, así que en la
+// práctica no perdemos nada).
+let restRateLimitedUntil = 0;
+const REST_BACKOFF_MS = 60 * 60_000; // 1 hora
+
 // Llamada REST a Primary para traer market data del símbolo dado. Devuelve
 // el objeto `marketData` (mismo shape que el WS) o null si falla.
 //
@@ -1348,6 +1380,10 @@ let lastIntraSaveDate = null;
 //  - Si la respuesta no es JSON, logueamos un fragmento del body crudo para
 //    poder diagnosticar (por ej. una página HTML de error de proxy / WAF).
 async function fetchPrimaryMarketData(symbol, marketId = 'ROFX') {
+  // Si el plan de Primary nos rate-limiteó hace poco, no volvemos a llamar
+  // hasta que se cumpla el backoff. El sampler usará WS en su lugar.
+  if (Date.now() < restRateLimitedUntil) return null;
+
   if (!authToken) {
     try { await authPrimary(); } catch { return null; }
   }
@@ -1363,6 +1399,13 @@ async function fetchPrimaryMarketData(symbol, marketId = 'ROFX') {
       headers: { 'X-Auth-Token': authToken, 'Accept': 'application/json' },
     });
     const text = await r.text();
+    // 429 = rate limit. Activamos backoff global de 1h y devolvemos null;
+    // el sampler caerá al WS sin ruido.
+    if (r.status === 429) {
+      restRateLimitedUntil = Date.now() + REST_BACKOFF_MS;
+      console.warn(`[intra] REST rate-limited (429); usando sólo WebSocket por 1h`);
+      return null;
+    }
     if (!r.ok) {
       console.warn(`[intra] REST ${r.status} for ${symbol}: ${text.slice(0, 160)}`);
       return null;
@@ -1409,35 +1452,44 @@ async function saveIntraFxSample() {
   try {
     if (!isMarketOpen()) return { ok: false, reason: 'market_closed' };
 
-    // 1) Pedimos LA por REST a los 3 tickers en paralelo. Si el símbolo
-    //    Primary no está resuelto todavía (discover no corrió), saltamos.
-    const tickers = ['AL30', 'AL30D', 'AL30C'];
-    const restMd = await Promise.all(tickers.map(async (t) => {
-      const sym = primarySymbolFor(t);
-      if (!sym) return null;
-      // marketId del instrumento resuelto:
-      const inst = resolved.find(i => symMap[i.symbol] === t);
-      return fetchPrimaryMarketData(sym, inst?.marketId || 'ROFX');
-    }));
-
-    // 2) Por cada ticker, preferimos LA del REST. Como fallback caemos al
-    //    último valor del WS (`latestData[t].marketData`), que sirve si
-    //    el REST devolvió error pero el WS sí tiene un LA cargado.
-    const get = (idx, t, entry) => {
-      const md  = restMd[idx];
-      const fromRest = extractFromMd(md, entry);
-      if (Number.isFinite(fromRest) && fromRest > 0) return fromRest;
-      const fromWs = extractFromMd(latestData[t]?.marketData, entry);
-      return Number.isFinite(fromWs) && fromWs > 0 ? fromWs : null;
+    // Estrategia v3: WebSocket FIRST.
+    // El WS de Primary ya empuja el LA en tiempo real (subscripción a 'LA' en
+    // entries). El REST tiene rate limit muy agresivo en algunos planes
+    // (Veta especialmente), así que arrancamos con el cache del WS y sólo
+    // caemos a REST si falta algún LA. Si REST se rate-limitea, el wrapper
+    // `fetchPrimaryMarketData` aplica un backoff de 1h sin más ruido.
+    const wsLA = (t) => {
+      const v = extractFromMd(latestData[t]?.marketData, 'LA');
+      return Number.isFinite(v) && v > 0 ? v : null;
     };
 
-    const al30_last  = get(0, 'AL30',  'LA');
-    const al30d_last = get(1, 'AL30D', 'LA');
-    const al30c_last = get(2, 'AL30C', 'LA');
+    let al30_last  = wsLA('AL30');
+    let al30d_last = wsLA('AL30D');
+    let al30c_last = wsLA('AL30C');
 
-    // Si no tenemos NINGÚN LA (ni REST ni WS) para los 3, abortamos. Eso
-    // suele pasar la primera vez que se carga el server fuera de horario o
-    // si Primary no devolvió nada todavía.
+    // Para los que falten en WS, probamos REST (uno por uno; sólo los que
+    // realmente hacen falta — minimiza la cantidad de llamadas).
+    const missing = [];
+    if (!al30_last)  missing.push('AL30');
+    if (!al30d_last) missing.push('AL30D');
+    if (!al30c_last) missing.push('AL30C');
+
+    for (const t of missing) {
+      const sym = primarySymbolFor(t);
+      if (!sym) continue;
+      const inst = resolved.find(i => symMap[i.symbol] === t);
+      const md = await fetchPrimaryMarketData(sym, inst?.marketId || 'ROFX');
+      const v = extractFromMd(md, 'LA');
+      if (Number.isFinite(v) && v > 0) {
+        if (t === 'AL30')  al30_last  = v;
+        else if (t === 'AL30D') al30d_last = v;
+        else if (t === 'AL30C') al30c_last = v;
+      }
+    }
+
+    // Si después de WS + REST aún falta algún LA, abortamos. Suele pasar
+    // los primeros segundos tras un restart (WS aún no llegó) o si Primary
+    // no operó todavía hoy en alguno de los 3.
     if (!al30_last || !al30d_last || !al30c_last) {
       return { ok: false, reason: 'no_last_price' };
     }

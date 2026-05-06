@@ -90,7 +90,9 @@ const S={
   // overlay: bloquea scroll de fondo (overflow:hidden) — el scroll vive dentro
   // del modal, no del overlay. Antes el overlay scrolleaba y se veía la tabla
   // detrás cuando el contenido del bono era largo.
-  overlay:{position:'fixed',inset:0,background:'rgba(0,0,0,0.75)',zIndex:10000,display:'flex',alignItems:'center',justifyContent:'center',padding:'24px 20px',overflow:'hidden',backdropFilter:'blur(4px)'},
+  // Padding del overlay con var responsive — en mobile se reduce a 8px
+   // así el modal aprovecha casi todo el ancho del viewport.
+  overlay:{position:'fixed',inset:0,background:'rgba(0,0,0,0.75)',zIndex:10000,display:'flex',alignItems:'center',justifyContent:'center',padding:'clamp(8px, 2vw, 24px)',overflow:'hidden',backdropFilter:'blur(4px)'},
   // modal: flex column con maxHeight=viewport para que header/metrics queden
   // pegados arriba y solo el body interno scrollee. boxSizing border-box para
   // que el padding del overlay no haga overflow.
@@ -104,6 +106,7 @@ const S={
   flyerBtn:{background:'transparent',border:'1px solid var(--neon)',borderRadius:6,color:'var(--neon)',fontFamily:"'Roboto',sans-serif",fontSize:10,fontWeight:700,letterSpacing:2,padding:'8px 14px',cursor:'pointer',textShadow:'var(--neon-glow)'},
   metrics:{display:'flex',borderBottom:'1px solid var(--border)',flexShrink:0},met:{flex:1,padding:'16px 12px',textAlign:'center',borderRight:'1px solid var(--border)'},metL:{fontSize:9,fontWeight:700,letterSpacing:2,color:'var(--text-dim)',marginBottom:6},metV:{fontFamily:"'Roboto Mono',monospace",fontSize:17,fontWeight:700},
   sec:{padding:'20px 24px',borderBottom:'1px solid var(--border)'},secT:{fontSize:10,fontWeight:700,letterSpacing:3,color:'var(--neon)',marginBottom:14,textTransform:'uppercase'},
-  grid:{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'0 32px'},row:{display:'flex',justifyContent:'space-between',alignItems:'baseline',padding:'7px 0',borderBottom:'1px solid rgba(128,128,128,0.08)',gap:12},rowL:{fontSize:12,color:'var(--text-dim)',flexShrink:0},rowV:{fontSize:12,color:'var(--text)',fontFamily:"'Roboto Mono',monospace",fontWeight:500,textAlign:'right',wordBreak:'break-word'},
+  // Grid auto-fit: 2 cols si caben (≥520px), 1 col en mobile.
+  grid:{display:'grid',gridTemplateColumns:'repeat(auto-fit, minmax(min(240px, 100%), 1fr))',gap:'0 32px'},row:{display:'flex',justifyContent:'space-between',alignItems:'baseline',padding:'7px 0',borderBottom:'1px solid rgba(128,128,128,0.08)',gap:12},rowL:{fontSize:12,color:'var(--text-dim)',flexShrink:0},rowV:{fontSize:12,color:'var(--text)',fontFamily:"'Roboto Mono',monospace",fontWeight:500,textAlign:'right',wordBreak:'break-word'},
   ft:{width:'100%',borderCollapse:'collapse'},fth:{padding:'8px 8px',fontSize:9,fontWeight:700,letterSpacing:2,color:'var(--neon)',textTransform:'uppercase',borderBottom:'1px solid var(--border-neon)',textAlign:'left'},ftd:{padding:'8px 8px',fontSize:12,fontFamily:"'Roboto Mono',monospace",borderBottom:'1px solid rgba(128,128,128,0.08)',color:'var(--text)'},
 };

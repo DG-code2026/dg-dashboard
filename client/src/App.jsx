@@ -136,8 +136,8 @@ function Layout() {
               <span style={{ ...st.hamLine, top: 5,  ...(menuOpen ? st.hamLineMid : {}) }} />
               <span style={{ ...st.hamLine, top: 10, ...(menuOpen ? st.hamLineBot : {}) }} />
             </span>
-            <span style={st.menuBtnLabel}>{activeTab.label}</span>
-            <span style={st.menuBtnCaret}>{menuOpen ? '▴' : '▾'}</span>
+            <span className="menu-btn-label" style={st.menuBtnLabel}>{activeTab.label}</span>
+            <span className="menu-btn-caret" style={st.menuBtnCaret}>{menuOpen ? '▴' : '▾'}</span>
           </button>
 
           {menuOpen && (
@@ -194,6 +194,32 @@ function Layout() {
 // Helper para que las rutas accedan al market data sin prop drilling.
 function useShellCtx() { return useOutletContext(); }
 
+// Hook compartido para el estado de mercado (BYMA abierto/cerrado). Pollea
+// cada 60s sólo cuando la pestaña está visible. Vive acá para que múltiples
+// componentes de la página de FX (TickerCard, DollarRates) puedan reusar el
+// mismo poll sin disparar requests redundantes.
+const FX_API_BASE = import.meta.env.VITE_API_URL || '';
+function useMarketStatusShared(intervalMs = 60_000) {
+  const [status, setStatus] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      try {
+        const r = await fetch(`${FX_API_BASE}/api/market/status`);
+        if (!r.ok) return;
+        const j = await r.json();
+        if (!cancelled) setStatus(j);
+      } catch { /* silencioso */ }
+    }
+    load();
+    const id = setInterval(() => {
+      if (document.visibilityState === 'visible') load();
+    }, intervalMs);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [intervalMs]);
+  return status;
+}
+
 // ══════════════════════════════════════════════
 //  ROUTES (un wrapper liviano por cada página)
 // ══════════════════════════════════════════════
@@ -202,7 +228,6 @@ function HomeRoute() {
   return (
     <section>
       <SH title="INICIO" />
-      <p style={st.sectionSub}>Panel general · próximos pagos · accesos rápidos</p>
       <HomePage />
     </section>
   );
@@ -211,11 +236,12 @@ function HomeRoute() {
 function FxRoute() {
   const { data, primaryConnected } = useShellCtx();
   const [commission, setCommission] = useState(0.6);
+  const market = useMarketStatusShared();
+  const marketOpen = !!market?.open;
   return (
     <>
       <section>
         <SH title="COTIZACIONES AL30" />
-        <p style={st.sectionSub}>CI · Contado Inmediato</p>
         <div style={st.grid3}>
           {TICKERS.map((t, i) => (
             <TickerCard
@@ -223,6 +249,7 @@ function FxRoute() {
               ticker={t}
               label={({ AL30: 'Pesos (ARS)', AL30D: 'Dólar MEP (USD-D)', AL30C: 'Dólar Cable (USD-C)' })[t]}
               data={data[t]}
+              marketOpen={marketOpen}
               delay={i * 100}
             />
           ))}
@@ -243,11 +270,10 @@ function FxRoute() {
           </div>
           <span style={st.commNote}>por operación (se aplica a cada pata: compra y venta de bonos)</span>
         </div>
-        <DollarRates data={data} commission={commission / 100} />
+        <DollarRates data={data} commission={commission / 100} market={market} />
       </section>
       <section style={{ marginTop: 32 }}>
         <SH title="EVOLUCIÓN DEL TIPO DE CAMBIO" />
-        <p style={st.sectionSub}>MEP · CABLE · CANJE · CI · día (intradiario) / semana / mes / anual (cierres diarios)</p>
         <RatioIntradayCharts connected={primaryConnected} />
       </section>
     </>
@@ -255,36 +281,36 @@ function FxRoute() {
 }
 
 function RfRoute() {
-  return <section><SH title="OBLIGACIONES NEGOCIABLES" /><p style={st.sectionSub}>API PPI · Settlement A-24HS</p><RentaFijaCorporativa /></section>;
+  return <section><SH title="OBLIGACIONES NEGOCIABLES" /><RentaFijaCorporativa /></section>;
 }
 function SobRoute() {
-  return <section><SH title="BONOS SOBERANOS" /><p style={st.sectionSub}>API PPI · Settlement A-48HS (MEP)</p><BonosSoberanos /></section>;
+  return <section><SH title="BONOS SOBERANOS" /><BonosSoberanos /></section>;
 }
 function SubRoute() {
-  return <section><SH title="BONOS SUBSOBERANOS" /><p style={st.sectionSub}>API PPI · Settlement A-48HS (MEP)</p><BonosSubsoberanos /></section>;
+  return <section><SH title="BONOS SUBSOBERANOS" /><BonosSubsoberanos /></section>;
 }
 function RotRoute() {
   const { data, primaryConnected } = useShellCtx();
-  return <section><SH title="CALCULADORA DE ROTACIONES" /><p style={st.sectionSub}>Bid/offer en vivo · WebSocket Primary · comisión aplicada en compra y venta</p><CalculadoraRotaciones marketData={data} primaryConnected={primaryConnected} /></section>;
+  return <section><SH title="CALCULADORA DE ROTACIONES" /><CalculadoraRotaciones marketData={data} primaryConnected={primaryConnected} /></section>;
 }
 function TradesRoute() {
   const { data, primaryConnected } = useShellCtx();
-  return <section><SH title="TRADE TRACKING" /><p style={st.sectionSub}>Seguimiento de operaciones con cotización en tiempo real · WebSocket Primary · A-24HS</p><TradeTrackingPage marketData={data} primaryConnected={primaryConnected} /></section>;
+  return <section><SH title="TRADE TRACKING" /><TradeTrackingPage marketData={data} primaryConnected={primaryConnected} /></section>;
 }
 function CartRoute() {
-  return <section><SH title="CARTERAS" /><p style={st.sectionSub}>Gestión de carteras de inversión</p><CarterasPage /></section>;
+  return <section><SH title="CARTERAS" /><CarterasPage /></section>;
 }
 function PropRoute() {
-  return <section><SH title="PROPUESTAS DE INVERSIÓN" /><p style={st.sectionSub}>Armado de carteras y flyer institucional</p><PropuestasPage /></section>;
+  return <section><SH title="PROPUESTAS DE INVERSIÓN" /><PropuestasPage /></section>;
 }
 function CartasRoute() {
   return <section><SH title="CARTAS" /><CartasPage /></section>;
 }
 function PershingRoute() {
-  return <section><SH title="FONDOS PERSHING" /><p style={st.sectionSub}>Listado de fondos disponibles · ISIN copiable · filtros por nombre y casa</p><FondosPershing /></section>;
+  return <section><SH title="FONDOS PERSHING" /><FondosPershing /></section>;
 }
 function AvisosRoute() {
-  return <section><SH title="AVISO DE SALDO" /><p style={st.sectionSub}>Cargá una planilla de Sheets · generá tarjetas con la imagen institucional + mensaje listo para copiar</p><AvisosSaldoPage /></section>;
+  return <section><SH title="AVISO DE SALDO" /><AvisosSaldoPage /></section>;
 }
 
 function NotFoundRoute() {
@@ -314,15 +340,22 @@ function SH({ title }) {
 }
 
 const st = {
-  container: { minHeight: '100vh', display: 'flex', flexDirection: 'column', padding: '24px 32px', maxWidth: 1400, margin: '0 auto' },
-  header: { display: 'grid', gridTemplateColumns: '1fr auto 1fr', alignItems: 'center', paddingBottom: 20, marginBottom: 32, borderBottom: '1px solid var(--border)', gap: 16 },
+  // Padding lateral y vertical responsivos (vars en index.css que cambian
+  // a 1024px y 720px). El maxWidth absoluto se mantiene para no estirar
+  // demás en monitores de 1440+.
+  container: { minHeight: '100vh', display: 'flex', flexDirection: 'column', padding: 'var(--page-pad-y) var(--page-pad-x)', maxWidth: 1400, margin: '0 auto' },
+  header: { display: 'grid', gridTemplateColumns: '1fr auto 1fr', alignItems: 'center', paddingBottom: 16, marginBottom: 'var(--section-gap)', borderBottom: '1px solid var(--border)', gap: 12 },
   headLeft: { position: 'relative', justifySelf: 'start', display: 'flex', alignItems: 'center' },
   headRight: { justifySelf: 'end', display: 'flex', alignItems: 'center', gap: 12 },
   logoArea: { display: 'flex', alignItems: 'center', justifySelf: 'center' },
-  logoImg: { height: 64, width: 'auto', display: 'block' },
+  // El logo escala con --logo-h (64px desktop / 44px mobile).
+  logoImg: { height: 'var(--logo-h)', width: 'auto', display: 'block' },
   themeBtn: { background: 'none', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', fontSize: 18, padding: '6px 10px', cursor: 'pointer', lineHeight: 1 },
 
   // ── Botón hamburger + dropdown ──
+  // En móvil --menu-min-w cae a 56px y el label/caret se ocultan via CSS
+  // (className "menu-btn-label" / "menu-btn-caret" en index.css), así el
+  // botón pasa a ser sólo el ícono — más espacio para el logo y el theme btn.
   menuBtn: {
     display: 'flex', alignItems: 'center', gap: 12,
     background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 6,
@@ -330,7 +363,7 @@ const st = {
     fontFamily: "'Montserrat', sans-serif", fontSize: 11, fontWeight: 700, letterSpacing: 2.5,
     color: 'var(--neon)',
     transition: 'border-color 0.15s, background 0.15s',
-    minWidth: 210,
+    minWidth: 'var(--menu-min-w)',
   },
   menuBtnOpen: { borderColor: 'var(--neon)', background: 'rgba(0,255,170,0.04)' },
   menuBtnLabel: { flex: 1, textAlign: 'left', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
@@ -368,12 +401,21 @@ const st = {
   dropdownItemActive: { color: 'var(--neon)', background: 'rgba(0,255,170,0.06)' },
   dropdownItemDot: { fontSize: 8, color: 'inherit', width: 10, textAlign: 'center' },
 
-  sh: { display: 'flex', alignItems: 'center', gap: 20, marginBottom: 8 },
-  shLine: { flex: 1, height: 1, background: 'linear-gradient(90deg, transparent, var(--border-neon), transparent)' },
-  shTitle: { fontFamily: "'Cormorant Garamond', Georgia, serif", fontWeight: 600, fontSize: 16, letterSpacing: 6, color: 'var(--neon)', whiteSpace: 'nowrap' },
+  // marginBottom 24 (antes 8): da más aire entre el título y el contenido
+  // de cada página → jerarquía visual más clara.
+  sh: { display: 'flex', alignItems: 'center', gap: 20, marginBottom: 24 },
+  shLine: { flex: 1, height: 1, background: 'linear-gradient(90deg, transparent, var(--border-neon), transparent)', minWidth: 8 },
+  // shTitle usa --title-color (white en dark, navy en light) en lugar de
+  // --neon. El neon queda reservado para chips/links/borders.
+  shTitle: { fontFamily: "'Cormorant Garamond', Georgia, serif", fontWeight: 600, fontSize: 'clamp(13px, 3.5vw, 16px)', letterSpacing: 'clamp(2px, 1vw, 6px)', color: 'var(--title-color)', whiteSpace: 'nowrap', textAlign: 'center' },
   sectionSub: { textAlign: 'center', fontSize: 12, color: 'var(--text-dim)', marginBottom: 24, letterSpacing: 1 },
-  grid3: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 20 },
-  commRow: { display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12, marginBottom: 24 },
+  // Las 3 cards de cotización AL30 son compactas (TickerCard "compact mode"),
+  // así que les damos columnas de mismo tamaño que ocupen menos espacio
+  // vertical. minmax 220px permite 3-en-fila en desktop y wrap en móvil.
+  grid3: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 },
+  // flexWrap permite que en mobile el "comisión + input + nota" caigan en
+   // varias líneas en vez de overflow horizontal.
+  commRow: { display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12, marginBottom: 24, flexWrap: 'wrap' },
   commLabel: { fontFamily: "'Roboto Mono', monospace", fontSize: 10, fontWeight: 500, letterSpacing: 2, color: 'var(--text-dim)' },
   commWrap: { display: 'flex', alignItems: 'center', gap: 4, background: 'var(--input-bg)', border: '1px solid var(--border)', borderRadius: 4, padding: '4px 8px' },
   commInput: { fontFamily: "'Roboto Mono', monospace", fontSize: 14, fontWeight: 700, color: 'var(--neon)', background: 'transparent', border: 'none', outline: 'none', width: 50, textAlign: 'right' },

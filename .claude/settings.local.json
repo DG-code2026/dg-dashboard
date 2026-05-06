@@ -56,7 +56,10 @@
       "Bash(curl -s \"http://localhost:3001/api/ppi/asset/info?ticker=PLC2D&type=ON\")",
       "Bash(curl -s \"http://localhost:3001/api/ppi/market-data/current?ticker=PLC2D&type=ON&settlement=A-24HS\")",
       "Bash(curl -s -X POST \"http://localhost:3001/api/ppi/bonds/batch?type=ON&settlement=A-24HS\" -H \"Content-Type: application/json\" -d '{\"tickers\":[\"PLC2D\"]}')",
-      "Bash(python3 -c ' *)"
+      "Bash(python3 -c ' *)",
+      "Bash(echo \"exit=$?\")",
+      "Bash(curl -s \"http://localhost:3001/api/ppi/market-data/current?ticker=AL30&type=BONOS&settlement=A-24HS\")",
+      "Bash(echo \"client=$?\")"
     ]
   }
 }

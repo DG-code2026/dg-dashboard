@@ -44,6 +44,31 @@
   --cal-chip-amort-fg: var(--text);
   --cal-today-glow: 0 0 6px rgba(0,255,170,0.18), inset 0 0 4px rgba(0,255,170,0.05);
   --cal-popover-glow: 0 8px 20px rgba(0,0,0,0.45), 0 0 10px rgba(0,255,170,0.15);
+
+  /* Borde de las cards de tipo de cambio (Oficial / MEP / CCL / Canje).
+     En tema oscuro va blanco; en tema claro va azul fuerte (ver bloque
+     [data-theme="light"]). 1px sólido. */
+  --fx-card-border: #FFFFFF;
+
+  /* Colores semánticos (theme-aware). Las páginas usan estos en lugar de
+     hex hardcodeados así el theme switch funciona sin fugas:
+       --warn  → ámbar (mercado cerrado, advertencias, badges no críticas)
+       --info  → azul institucional (links, accents secundarios)
+     También exponemos versiones "soft" (con alpha) para fondos sutiles. */
+  --warn: #F59E0B;
+  --warn-soft: rgba(245,158,11,0.10);
+  --warn-border: rgba(245,158,11,0.35);
+  --info: #3B82F6;
+  --info-soft: rgba(59,130,246,0.10);
+  --info-border: rgba(59,130,246,0.35);
+  --red-soft: rgba(232,93,93,0.08);
+  --red-border: rgba(232,93,93,0.30);
+
+  /* Color de los títulos de sección principal (SH). En tema oscuro queremos
+     blanco puro para que destaque sobre el fondo navy/dark sin competir con
+     el --neon azul-acero (que se usa para chips/borders/links). En light
+     se sobreescribe a navy fuerte abajo. */
+  --title-color: #FFFFFF;
 }
 
 [data-theme="light"] {
@@ -81,9 +106,138 @@
   --cal-chip-amort-fg: #334155;
   --cal-today-glow: 0 0 6px rgba(22,163,74,0.35), inset 0 0 4px rgba(22,163,74,0.10);
   --cal-popover-glow: 0 8px 20px rgba(0,0,0,0.15), 0 0 10px rgba(22,163,74,0.25);
+
+  /* Borde de las cards de tipo de cambio en tema claro: azul institucional
+     fuerte (#1E40AF = Tailwind blue-800). Contrasta bien sobre el cream del
+     bg-card y se diferencia del borde sutil --border que usan otras cards. */
+  --fx-card-border: #1E40AF;
+
+  /* Colores semánticos en light theme: tonos un poco más profundos para
+     conservar contraste sobre fondos claros. */
+  --warn: #C2410C;
+  --warn-soft: rgba(194,65,12,0.10);
+  --warn-border: rgba(194,65,12,0.35);
+  --info: #1D4ED8;
+  --info-soft: rgba(29,78,216,0.08);
+  --info-border: rgba(29,78,216,0.35);
+  --red-soft: rgba(192,64,64,0.08);
+  --red-border: rgba(192,64,64,0.30);
+
+  /* Title color en light: navy institucional fuerte. Mantiene la jerarquía
+     visual sobre fondo cream (#F7F5F0). */
+  --title-color: #1A2236;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
+
+/* Tipografía unificada: TODA la app en Montserrat (incluye números).
+   El !important sobrescribe cualquier fontFamily inline en los componentes
+   (varios usan 'Roboto Mono' o 'Cormorant Garamond' en sus styles JSX) sin
+   tener que tocar 200+ archivos. Si alguna vez se necesita una excepción
+   puntual, agregar `font-family: ... !important` con mayor especificidad
+   o como `style={{ ['fontFamily']: ... }}` con `!important` no funciona en
+   inline styles de React — hay que crear una clase con override.
+
+   tabular-nums activa los glifos de ancho constante de Montserrat para que
+   precios y cifras en columnas alineen correctamente. */
+*, *::before, *::after {
+  font-family: 'Montserrat', sans-serif !important;
+}
+/* Tabular nums (cifras de ancho fijo) sólo en tablas — sirve para alinear
+   precios en columnas. Aplicarlo globalmente padea el "1" de Montserrat
+   (más angosto que el "0") para igualarlos, lo que crea gaps visibles en
+   números hero como "$106,90" → "$1 06,90". Por eso lo restringimos a
+   `<table>` y a la clase utility `.tnum` para casos puntuales. */
+table, .tnum {
+  font-feature-settings: 'tnum';
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Responsive sizing (vars consumidas inline en componentes) ──
+   Definimos paddings, gaps y máximos que cambian con el viewport. Los JSX
+   styles los referencian con var(--page-pad-x), var(--section-gap), etc.
+   El navegador resuelve automáticamente al breakpoint correcto. */
+:root {
+  --page-pad-x: 32px;
+  --page-pad-y: 24px;
+  --section-gap: 32px;
+  --grid-gap: 16px;
+  --logo-h: 64px;
+  --menu-min-w: 210px;
+}
+@media (max-width: 1024px) {
+  :root {
+    --page-pad-x: 20px;
+    --section-gap: 28px;
+  }
+}
+@media (max-width: 720px) {
+  :root {
+    --page-pad-x: 12px;
+    --page-pad-y: 14px;
+    --section-gap: 22px;
+    --grid-gap: 10px;
+    --logo-h: 44px;
+    --menu-min-w: 56px; /* sólo el botón hamburger, sin label visible */
+  }
+}
+
+/* Helper: tablas que deben hacer scroll horizontal en móvil cuando exceden
+   el ancho del viewport, sin romper layout. Aplicar como className. */
+.scroll-x { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.scroll-x::-webkit-scrollbar { height: 6px; }
+.scroll-x::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+/* ─── Mobile (≤720px): reglas globales que sobreviven sin tocar 200 archivos ─── */
+@media (max-width: 720px) {
+  /* Header del menú: el label/caret del hamburger se ocultan, queda sólo
+     el ícono → libera espacio para logo y status. */
+  .menu-btn-label { display: none !important; }
+  .menu-btn-caret { display: none !important; }
+
+  /* StatusBar (BACKEND / PRIMARY WS) apilada en 2 líneas. */
+  .status-bar {
+    flex-direction: column !important;
+    align-items: flex-end !important;
+    gap: 4px !important;
+  }
+
+  /* REGLA DURA: la página principal NUNCA tiene scroll horizontal. Si una
+     tabla o card excede el ancho, se recorta — pero el body queda fijo.
+     Los popups manejan su propio scroll horizontal con la clase
+     `.flyer-scroll` o equivalentes (ver más abajo). */
+  html, body {
+    overflow-x: hidden !important;
+    max-width: 100vw;
+  }
+
+  /* Tablas dentro del flujo normal: nowrap en celdas para mantener
+     legibilidad numérica. Si exceden, se ven cortadas (consistente con la
+     regla dura de overflow-x: hidden en body). */
+  table th, table td {
+    white-space: nowrap;
+  }
+
+  /* Scroll horizontal PERMITIDO sólo dentro de popups/modales que lo
+     declaren explícitamente con className="flyer-scroll" o data-popup-scroll.
+     Ej: el FlyerModal de BondPage usa esto para que el flyer (que puede ser
+     >800px) se previsualice swipeando lateralmente en el celu. */
+  .flyer-scroll,
+  [data-popup-scroll] {
+    overflow-x: auto !important;
+    -webkit-overflow-scrolling: touch;
+  }
+}
+
+/* ─── Mobile angosto (≤480px): cards y forms aún más compactos ─── */
+@media (max-width: 480px) {
+  /* Forms con grid de 2+ columnas → colapsan a 1. */
+  *:has(> input):has(> label),
+  .form-grid {
+    grid-template-columns: 1fr !important;
+  }
+}
+
 body { font-family: 'Montserrat', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; -webkit-font-smoothing: antialiased; transition: background 0.3s, color 0.3s; }
 @keyframes pulse-neon { 0%,100%{opacity:1} 50%{opacity:0.7} }
 @keyframes fade-in { from{opacity:0;transform:translateY(12px)} to{opacity:1;transform:translateY(0)} }
