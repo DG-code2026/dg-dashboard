@@ -194,6 +194,7 @@ table, .tnum {
      el ícono → libera espacio para logo y status. */
   .menu-btn-label { display: none !important; }
   .menu-btn-caret { display: none !important; }
+  .ooo-btn-label  { display: none !important; }
 
   /* StatusBar (BACKEND / PRIMARY WS) apilada en 2 líneas. */
   .status-bar {

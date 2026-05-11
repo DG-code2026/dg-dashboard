@@ -8,6 +8,7 @@ import StatusBar from './components/StatusBar';
 import TickerCard from './components/TickerCard';
 import DollarRates from './components/DollarRates';
 import RatioIntradayCharts from './components/RatioIntradayCharts';
+import OutOfOfficeModal from './components/OutOfOfficeModal';
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  ROUTING + LAZY LOADING
@@ -30,6 +31,7 @@ const CartasPage            = lazy(() => import('./components/CartasPage'));
 const FondosPershing        = lazy(() => import('./components/FondosPershing'));
 const CalculadoraRotaciones = lazy(() => import('./components/CalculadoraRotaciones'));
 const AvisosSaldoPage       = lazy(() => import('./components/AvisosSaldoPage'));
+const ClientesPage          = lazy(() => import('./components/ClientesPage'));
 
 const TICKERS = ['AL30', 'AL30D', 'AL30C'];
 
@@ -47,6 +49,7 @@ const TABS = [
   { path: '/propuestas',   label: 'PROPUESTAS',                group: 'Gestión' },
   { path: '/cartas',       label: 'CARTAS',                    group: 'Gestión' },
   { path: '/avisos-saldo', label: 'AVISO DE SALDO',            group: 'Gestión' },
+  { path: '/clientes',     label: 'CLIENTES',                  group: 'Gestión' },
 ];
 
 export default function App() {
@@ -66,6 +69,7 @@ export default function App() {
           <Route path="cartas"       element={<CartasRoute />} />
           <Route path="pershing"     element={<PershingRoute />} />
           <Route path="avisos-saldo" element={<AvisosRoute />} />
+          <Route path="clientes"     element={<ClientesRoute />} />
           <Route path="*"            element={<NotFoundRoute />} />
         </Route>
       </Routes>
@@ -82,6 +86,7 @@ export default function App() {
 function Layout() {
   const { data, connected, primaryConnected } = useMarketData();
   const [menuOpen, setMenuOpen] = useState(false);
+  const [oooOpen, setOooOpen]   = useState(false); // modal "Fuera de oficina"
   const [theme, setTheme] = useState(() => {
     try { return localStorage.getItem('theme') || 'dark'; } catch { return 'dark'; }
   });
@@ -174,10 +179,22 @@ function Layout() {
         </div>
 
         <div style={st.headRight}>
+          {/* Generador de cartel "Fuera de oficina" — modal con preview canvas */}
+          <button
+            onClick={() => setOooOpen(true)}
+            style={st.oooBtn}
+            title="Generar foto de perfil 'Fuera de oficina'"
+            aria-label="Fuera de oficina"
+          >
+            <span aria-hidden="true">🏖️</span>
+            <span className="ooo-btn-label" style={st.oooBtnLabel}>FUERA DE OFICINA</span>
+          </button>
           <button onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')} style={st.themeBtn}>{theme === 'dark' ? '☀' : '☾'}</button>
           <StatusBar connected={connected} primaryConnected={primaryConnected} />
         </div>
       </header>
+
+      {oooOpen && <OutOfOfficeModal onClose={() => setOooOpen(false)} />}
 
       {/* Suspense compartido para todas las rutas lazy. */}
       <Suspense fallback={<RouteLoader />}>
@@ -312,6 +329,9 @@ function PershingRoute() {
 function AvisosRoute() {
   return <section><SH title="AVISO DE SALDO" /><AvisosSaldoPage /></section>;
 }
+function ClientesRoute() {
+  return <section><SH title="CLIENTES" /><ClientesPage /></section>;
+}
 
 function NotFoundRoute() {
   const navigate = useNavigate();
@@ -351,6 +371,18 @@ const st = {
   // El logo escala con --logo-h (64px desktop / 44px mobile).
   logoImg: { height: 'var(--logo-h)', width: 'auto', display: 'block' },
   themeBtn: { background: 'none', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', fontSize: 18, padding: '6px 10px', cursor: 'pointer', lineHeight: 1 },
+  // Botón "Fuera de oficina": ícono + label oculto en mobile (igual al
+  // pattern del menu hamburger). Le pone un tono naranja sutil para
+  // diferenciarse del theme btn.
+  oooBtn: {
+    display: 'inline-flex', alignItems: 'center', gap: 6,
+    background: 'transparent', border: '1px solid var(--border)', borderRadius: 6,
+    color: 'var(--text)', fontFamily: "'Roboto Mono', monospace",
+    fontSize: 10, fontWeight: 700, letterSpacing: 1.5,
+    padding: '6px 10px', cursor: 'pointer', lineHeight: 1,
+    transition: 'border-color 0.15s, color 0.15s',
+  },
+  oooBtnLabel: { whiteSpace: 'nowrap' },
 
   // ── Botón hamburger + dropdown ──
   // En móvil --menu-min-w cae a 56px y el label/caret se ocultan via CSS

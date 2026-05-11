@@ -3,6 +3,9 @@ import express from 'express';
 import cors from 'cors';
 import { WebSocketServer, WebSocket } from 'ws';
 import http from 'http';
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
+import twilio from 'twilio';
 import { httpJson, singleflight, HttpError } from './lib/http.js';
 
 const app = express();
@@ -26,7 +29,7 @@ const SUPA_KEY = process.env.SUPABASE_KEY;
 async function supa(path, opts = {}) {
   // Timeout duro de 8s para que Supabase no cuelgue requests del cliente.
   // Reintento implícito una vez en errores 5xx / network / timeout.
-  const { data } = await httpJson(`${SUPA_URL}/rest/v1${path}`, {
+  const { status, data } = await httpJson(`${SUPA_URL}/rest/v1${path}`, {
     method: opts.method || 'GET',
     headers: {
       'apikey': SUPA_KEY,
@@ -37,6 +40,16 @@ async function supa(path, opts = {}) {
     timeoutMs: 8000,
     retries: 1,
   });
+  // httpJson sólo lanza para 5xx — PostgREST devuelve 4xx con body { code,
+  // message, ... } que silenciosamente se nos colaba como "data válida".
+  // Lo elevamos a excepción para que los handlers de arriba puedan reaccionar.
+  if (status >= 400) {
+    const msg = (data && (data.message || data.error)) || `Supabase HTTP ${status}`;
+    const err = new Error(msg);
+    err.status = status;
+    err.body = data;
+    throw err;
+  }
   return data;
 }
 
@@ -189,6 +202,40 @@ app.get('/api/db/trades', async (req, res) => {
   catch (e) { res.json([]); }
 });
 
+// Si Supabase rechaza por columna inexistente (PostgREST 42703), reintentamos
+// sin esa columna. Permite operar contra tablas que aún no migraron `market_fee`.
+async function supaInsertTolerant(tableUrl, row) {
+  try {
+    return await supa(tableUrl, { method: 'POST', body: row });
+  } catch (e) {
+    const msg = String(e?.message || '');
+    const m = msg.match(/column "?(\w+)"? of relation|Could not find the '(\w+)' column/i);
+    const missing = m?.[1] || m?.[2];
+    if (missing && missing in row) {
+      const { [missing]: _drop, ...rest } = row;
+      console.warn(`[supaInsertTolerant] columna '${missing}' no existe en la tabla, reintento sin ella`);
+      return supa(tableUrl, { method: 'POST', body: rest });
+    }
+    throw e;
+  }
+}
+
+async function supaPatchTolerant(tableUrl, row) {
+  try {
+    return await supa(tableUrl, { method: 'PATCH', body: row });
+  } catch (e) {
+    const msg = String(e?.message || '');
+    const m = msg.match(/column "?(\w+)"? of relation|Could not find the '(\w+)' column/i);
+    const missing = m?.[1] || m?.[2];
+    if (missing && missing in row) {
+      const { [missing]: _drop, ...rest } = row;
+      console.warn(`[supaPatchTolerant] columna '${missing}' no existe, reintento sin ella`);
+      return supa(tableUrl, { method: 'PATCH', body: rest });
+    }
+    throw e;
+  }
+}
+
 app.post('/api/db/trades', async (req, res) => {
   try {
     const body = req.body || {};
@@ -210,16 +257,22 @@ app.post('/api/db/trades', async (req, res) => {
       market_fee: body.market_fee != null ? Number(body.market_fee) : 0.01,
       notes: body.notes || '',
     };
-    const r = await supa('/trades', { method: 'POST', body: row });
+    const r = await supaInsertTolerant('/trades', row);
     res.json(Array.isArray(r) ? r[0] : r);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('POST /api/db/trades:', e);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.patch('/api/db/trades/:id', async (req, res) => {
   try {
-    const r = await supa(`/trades?id=eq.${req.params.id}`, { method: 'PATCH', body: { ...req.body, updated_at: new Date().toISOString() } });
+    const r = await supaPatchTolerant(`/trades?id=eq.${req.params.id}`, { ...req.body, updated_at: new Date().toISOString() });
     res.json(Array.isArray(r) ? r[0] : r);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('PATCH /api/db/trades:', e);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.delete('/api/db/trades/:id', async (req, res) => {
@@ -376,6 +429,318 @@ app.delete('/api/db/fondos-pershing/:isin', async (req, res) => {
 });
 
 // ══════════════════════════════════════════════
+//  CLIENTES (DB de clientes con login gate)
+//
+//  - Auth: bcrypt-verified password → JWT (HS256, 8h TTL) en header
+//    `Authorization: Bearer <token>`. La clave hasheada vive en
+//    CLIENTES_PASSWORD_HASH; rotala generando un nuevo hash con bcryptjs.
+//  - Acceso: todos los endpoints /api/clientes/* (excepto /login) requieren
+//    el JWT válido. Si se cae la verificación → 401.
+//  - Storage: tabla `clientes` en Supabase (ver server/clientes_schema.sql).
+// ══════════════════════════════════════════════
+const CLIENTES_PASS_HASH = process.env.CLIENTES_PASSWORD_HASH || '';
+const CLIENTES_JWT_SECRET = process.env.CLIENTES_JWT_SECRET || '';
+const CLIENTES_JWT_TTL = '8h';
+
+function requireClientesAuth(req, res, next) {
+  const auth = req.headers.authorization || '';
+  const m = auth.match(/^Bearer\s+(.+)$/i);
+  if (!m) return res.status(401).json({ error: 'unauthorized' });
+  try {
+    jwt.verify(m[1], CLIENTES_JWT_SECRET);
+    return next();
+  } catch {
+    return res.status(401).json({ error: 'unauthorized' });
+  }
+}
+
+// Login: comparamos con bcrypt (timing-safe). Pequeño rate-limit en memoria
+// por IP para frenar fuerza bruta básica.
+const loginAttempts = new Map(); // ip → { count, lockUntil }
+const LOGIN_MAX = 5;
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+
+app.post('/api/clientes/login', async (req, res) => {
+  const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown').toString().split(',')[0].trim();
+  const now = Date.now();
+  const rec = loginAttempts.get(ip);
+  if (rec && rec.lockUntil > now) {
+    return res.status(429).json({ error: 'too many attempts', retryAfterSeconds: Math.ceil((rec.lockUntil - now) / 1000) });
+  }
+  const { password } = req.body || {};
+  if (typeof password !== 'string' || !password) {
+    return res.status(400).json({ error: 'password required' });
+  }
+  if (!CLIENTES_PASS_HASH || !CLIENTES_JWT_SECRET) {
+    return res.status(500).json({ error: 'server not configured (missing CLIENTES_PASSWORD_HASH or CLIENTES_JWT_SECRET in .env)' });
+  }
+  const ok = await bcrypt.compare(password, CLIENTES_PASS_HASH);
+  if (!ok) {
+    const cur = rec || { count: 0, lockUntil: 0 };
+    cur.count += 1;
+    if (cur.count >= LOGIN_MAX) {
+      cur.lockUntil = now + LOGIN_WINDOW_MS;
+      cur.count = 0;
+    }
+    loginAttempts.set(ip, cur);
+    return res.status(401).json({ error: 'invalid password' });
+  }
+  loginAttempts.delete(ip);
+  const token = jwt.sign({ scope: 'clientes' }, CLIENTES_JWT_SECRET, { expiresIn: CLIENTES_JWT_TTL });
+  res.json({ token, expiresIn: CLIENTES_JWT_TTL });
+});
+
+// Verificación rápida de token (para que el front sepa si la sesión sigue viva)
+app.get('/api/clientes/me', requireClientesAuth, (_req, res) => res.json({ ok: true }));
+
+// LIST: search (q) + filtros opcionales (broker, asesor, tipo_cuenta) + orden.
+// Devuelve TODOS los matches — la tabla son ~1k filas, no necesitamos
+// paginación server-side y el front filtra/ordena cómodo en memoria.
+app.get('/api/db/clientes', requireClientesAuth, async (req, res) => {
+  try {
+    const params = new URLSearchParams();
+    params.set('order', 'nombre.asc');
+    if (req.query.broker) params.set('broker', `eq.${req.query.broker}`);
+    if (req.query.asesor) params.set('asesor', `eq.${req.query.asesor}`);
+    if (req.query.tipo_cuenta) params.set('tipo_cuenta', `eq.${req.query.tipo_cuenta}`);
+    if (req.query.q) {
+      const q = String(req.query.q).replace(/[*%,()]/g, ' ').trim();
+      if (q) params.set('or', `(nombre.ilike.*${q}*,email.ilike.*${q}*,comitente.ilike.*${q}*,telefono.ilike.*${q}*)`);
+    }
+    const data = await supa(`/clientes?${params.toString()}`);
+    res.json(Array.isArray(data) ? data : []);
+  } catch (e) {
+    console.error('GET /api/db/clientes:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Helper: valida y normaliza payload antes de mandar a Supabase.
+function sanitizeClienteBody(body = {}) {
+  const out = {};
+  const txt = (v) => (v === null || v === undefined) ? null : String(v).trim() || null;
+  if ('nombre' in body)           out.nombre = txt(body.nombre);
+  if ('email' in body)            out.email = txt(body.email);
+  if ('comitente' in body)        out.comitente = txt(body.comitente);
+  if ('broker' in body)           out.broker = txt(body.broker);
+  if ('telefono' in body)         out.telefono = txt(body.telefono);
+  if ('telefono_raw' in body)     out.telefono_raw = txt(body.telefono_raw);
+  if ('asesor' in body)           out.asesor = txt(body.asesor);
+  if ('tipo_cuenta' in body) {
+    const t = txt(body.tipo_cuenta);
+    out.tipo_cuenta = (t === 'PF' || t === 'PJ') ? t : null;
+  }
+  if ('fecha_nacimiento' in body) {
+    const d = txt(body.fecha_nacimiento);
+    // Esperamos YYYY-MM-DD. Si viene otra cosa, intentamos parsearla.
+    if (d && /^\d{4}-\d{2}-\d{2}$/.test(d)) out.fecha_nacimiento = d;
+    else if (d) {
+      const parsed = new Date(d);
+      out.fecha_nacimiento = isNaN(parsed) ? null : parsed.toISOString().slice(0, 10);
+    } else out.fecha_nacimiento = null;
+  }
+  return out;
+}
+
+app.post('/api/db/clientes', requireClientesAuth, async (req, res) => {
+  try {
+    const body = sanitizeClienteBody(req.body);
+    if (!body.nombre) return res.status(400).json({ error: 'nombre required' });
+    const data = await supa('/clientes', { method: 'POST', body });
+    res.json(Array.isArray(data) ? data[0] : data);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Bulk insert — recibe array, lo sanitiza y manda en una sola llamada.
+app.post('/api/db/clientes/bulk', requireClientesAuth, async (req, res) => {
+  try {
+    const rows = Array.isArray(req.body) ? req.body : req.body?.rows;
+    if (!Array.isArray(rows) || rows.length === 0) return res.status(400).json({ error: 'rows array required' });
+    const clean = rows
+      .map(sanitizeClienteBody)
+      .filter(r => r.nombre);
+    if (clean.length === 0) return res.status(400).json({ error: 'no valid rows (nombre required on each)' });
+    // Supabase REST: POST a /clientes con array hace bulk insert
+    const data = await supa('/clientes', { method: 'POST', body: clean });
+    res.json({ inserted: Array.isArray(data) ? data.length : 0 });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.patch('/api/db/clientes/:id', requireClientesAuth, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (!id) return res.status(400).json({ error: 'invalid id' });
+    const body = sanitizeClienteBody(req.body);
+    body.updated_at = new Date().toISOString();
+    const data = await supa(`/clientes?id=eq.${id}`, { method: 'PATCH', body });
+    res.json(Array.isArray(data) ? data[0] : data);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/db/clientes/:id', requireClientesAuth, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (!id) return res.status(400).json({ error: 'invalid id' });
+    await supa(`/clientes?id=eq.${id}`, { method: 'DELETE' });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ══════════════════════════════════════════════
+//  CRON: cumpleaños del día → WhatsApp a asesores
+//
+//  Disparo: HTTP POST a /api/cron/birthday-whatsapp con header
+//  `X-Cron-Secret: <CRON_SECRET>`. Configurar cron-job.org (gratis) para
+//  llamar todos los días a las 09:00 ART:
+//     URL:    https://<tu-server>/api/cron/birthday-whatsapp
+//     Method: POST
+//     Header: X-Cron-Secret: <valor de CRON_SECRET>
+//     Schedule: 0 12 * * *  (12 UTC = 09 ART)
+//
+//  El endpoint también acepta ?dry=1 para previsualizar el mensaje sin enviar.
+// ══════════════════════════════════════════════
+const TWILIO_SID   = process.env.TWILIO_ACCOUNT_SID;
+const TWILIO_TOKEN = process.env.TWILIO_AUTH_TOKEN;
+const TWILIO_FROM  = process.env.TWILIO_WHATSAPP_FROM;
+const TWILIO_TEMPLATE_SID = process.env.TWILIO_TEMPLATE_SID || '';
+const CRON_SECRET  = process.env.CRON_SECRET || '';
+
+let twilioClient = null;
+function getTwilio() {
+  if (twilioClient) return twilioClient;
+  if (!TWILIO_SID || !TWILIO_TOKEN || TWILIO_TOKEN.startsWith('__')) return null;
+  twilioClient = twilio(TWILIO_SID, TWILIO_TOKEN);
+  return twilioClient;
+}
+
+// Mapa asesor → whatsapp:+<num>. Las keys se normalizan (mayúsculas, sin
+// acentos) para tolerar "GAVIÑA" / "GAVINA" / "gaviña ".
+function normAsesor(s) {
+  return String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').trim().toUpperCase();
+}
+const ADVISOR_TO_WHATSAPP = {
+  DELFINO: process.env.ADVISOR_WHATSAPP_DELFINO,
+  GAVINA:  process.env.ADVISOR_WHATSAPP_GAVINA,
+};
+
+function formatPhoneDisplay(p) {
+  if (!p) return '';
+  // Tomamos el formato +54 11 XXXXXXXX y lo dejamos legible
+  return p.replace(/^\+/, '').replace(/(\d{2})\s?(\d{2,3})\s?(\d+)/, '+$1 $2 $3');
+}
+
+function buildBirthdayMessage(clientes) {
+  const lines = [`🎂 Cumpleaños de hoy (${clientes.length})`, ''];
+  for (const c of clientes) {
+    const edad = c._edad != null ? `cumple ${c._edad}` : '';
+    const head = `• ${c.nombre}${edad ? ' — ' + edad : ''}`;
+    const tel  = c.telefono ? `📞 ${c.telefono}` : '';
+    const com  = c.comitente ? `Com. ${c.comitente}${c.broker ? ' (' + c.broker + ')' : ''}` : '';
+    const meta = [tel, com].filter(Boolean).join(' · ');
+    lines.push(head);
+    if (meta) lines.push('  ' + meta);
+  }
+  return lines.join('\n');
+}
+
+// Devuelve {month, day} para la zona horaria de Argentina (UTC-3, sin DST).
+function todayInArgentina() {
+  const now = new Date();
+  // formatToParts en es-AR con TZ explícito → sin sorpresas DST.
+  const parts = new Intl.DateTimeFormat('es-AR', {
+    timeZone: 'America/Argentina/Buenos_Aires',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(now);
+  const get = (t) => parts.find(p => p.type === t)?.value;
+  return { year: +get('year'), month: +get('month'), day: +get('day') };
+}
+
+async function fetchBirthdaysToday() {
+  const { month, day } = todayInArgentina();
+  // PostgREST no soporta extract(); traemos toda la tabla (es chica) y
+  // filtramos en memoria. Para ~1k filas es instantáneo.
+  const all = await supa('/clientes?select=nombre,telefono,comitente,broker,asesor,fecha_nacimiento,tipo_cuenta');
+  const todayList = (Array.isArray(all) ? all : []).filter(c => {
+    if (!c.fecha_nacimiento) return false;
+    const d = new Date(c.fecha_nacimiento + 'T00:00:00');
+    return d.getUTCMonth() + 1 === month && d.getUTCDate() === day;
+  });
+  // calcular edad que cumplen hoy
+  const yearNow = todayInArgentina().year;
+  return todayList.map(c => {
+    const d = new Date(c.fecha_nacimiento + 'T00:00:00');
+    return { ...c, _edad: yearNow - d.getUTCFullYear() };
+  });
+}
+
+async function sendWhatsApp(to, body) {
+  const client = getTwilio();
+  if (!client) throw new Error('Twilio no está configurado (faltan TWILIO_ACCOUNT_SID/AUTH_TOKEN en .env)');
+  const payload = { from: TWILIO_FROM, to };
+  if (TWILIO_TEMPLATE_SID) {
+    // Modo template aprobado: se asume que la plantilla tiene UNA variable
+    // {{1}} que recibe el cuerpo entero (Meta no permite > ~1024 chars).
+    payload.contentSid = TWILIO_TEMPLATE_SID;
+    payload.contentVariables = JSON.stringify({ 1: body.slice(0, 1000) });
+  } else {
+    payload.body = body;
+  }
+  return client.messages.create(payload);
+}
+
+app.post('/api/cron/birthday-whatsapp', async (req, res) => {
+  // Auth: header o query param (cron-job.org soporta ambos)
+  const provided = req.headers['x-cron-secret'] || req.query.secret || '';
+  if (!CRON_SECRET || provided !== CRON_SECRET) {
+    return res.status(401).json({ error: 'unauthorized' });
+  }
+  const dry = req.query.dry === '1' || req.query.dry === 'true';
+  try {
+    const clientes = await fetchBirthdaysToday();
+    if (clientes.length === 0) {
+      return res.json({ ok: true, sent: 0, reason: 'no birthdays today' });
+    }
+    // Agrupar por asesor normalizado
+    const byAdvisor = {};
+    for (const c of clientes) {
+      const key = normAsesor(c.asesor);
+      (byAdvisor[key] ||= []).push(c);
+    }
+    // Filtro opcional ?only=DELFINO,GAVINA — útil para tests selectivos
+    if (req.query.only) {
+      const allowed = new Set(String(req.query.only).split(',').map(s => normAsesor(s)));
+      for (const k of Object.keys(byAdvisor)) {
+        if (!allowed.has(k)) delete byAdvisor[k];
+      }
+    }
+    const results = [];
+    for (const [advisorKey, list] of Object.entries(byAdvisor)) {
+      const to = ADVISOR_TO_WHATSAPP[advisorKey];
+      const body = buildBirthdayMessage(list);
+      if (!to) {
+        results.push({ asesor: advisorKey, count: list.length, status: 'skipped', reason: 'no whatsapp configured' });
+        continue;
+      }
+      if (dry) {
+        results.push({ asesor: advisorKey, count: list.length, status: 'dry-run', to, body });
+        continue;
+      }
+      try {
+        const m = await sendWhatsApp(to, body);
+        results.push({ asesor: advisorKey, count: list.length, status: 'sent', to, sid: m.sid });
+      } catch (e) {
+        console.error(`[cron whatsapp] error mandando a ${advisorKey} (${to}):`, e.message);
+        results.push({ asesor: advisorKey, count: list.length, status: 'error', to, error: e.message });
+      }
+    }
+    res.json({ ok: true, date: todayInArgentina(), total: clientes.length, results });
+  } catch (e) {
+    console.error('[cron whatsapp] fatal:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ══════════════════════════════════════════════
 //  PPI API
 // ══════════════════════════════════════════════
 const PPI_BASE = 'https://clientapi.portfoliopersonal.com';
@@ -526,11 +891,32 @@ app.get('/api/ppi/market-data/current', async (req, res) => {
 });
 
 // Bonds estimate (single ticker)
+// Acepta query params extras (Currency, ExchangeRate, etc.) que se inyectan
+// al request a PPI sin tocar el código — útil para testing rápido sin
+// redeploys. Cualquier param que NO sea ticker/price y empiece con mayúscula
+// pasa directo (PPI usa PascalCase).
 app.get('/api/ppi/bonds/estimate', async (req, res) => {
   try {
     await getPPIToken();
-    const { ticker, price } = req.query;
-    const r = await ppiFetch(`/api/${PPI_V}/MarketData/Bonds/Estimate?${new URLSearchParams({ Ticker: ticker, Date: new Date().toISOString(), QuantityType: 'PAPELES', Quantity: '100', AmountOfMoney: '0', Price: price, ExchangeRate: '1', EquityRate: '0', ExchangeRateAmortization: '0', RateAdjustmentAmortization: '0' })}`, { headers: ppiH() });
+    const { ticker, price, ...rest } = req.query;
+    const params = {
+      Ticker: ticker,
+      Date: new Date().toISOString(),
+      QuantityType: 'PAPELES',
+      Quantity: '100',
+      AmountOfMoney: '0',
+      Price: price,
+      ExchangeRate: '1',
+      EquityRate: '0',
+      ExchangeRateAmortization: '0',
+      RateAdjustmentAmortization: '0',
+    };
+    // Override / add cualquier param que llegue en la query (case-sensitive,
+    // PascalCase como espera PPI).
+    for (const [k, v] of Object.entries(rest)) {
+      params[k] = String(v);
+    }
+    const r = await ppiFetch(`/api/${PPI_V}/MarketData/Bonds/Estimate?${new URLSearchParams(params)}`, { headers: ppiH() });
     res.json(r.data);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });

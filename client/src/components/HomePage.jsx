@@ -437,46 +437,82 @@ function CalCell({ c, isOpen, onOpen, onClose }) {
 //  en la sub-card clickeada durante ~1.5s.
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Los 3 canales de apertura. El orden refleja la prioridad comercial
-// (local → offshore Pershing → offshore IBKR).
+// Canales de apertura. Cada uno tiene URL específica por asesor: PPI distingue
+// con un parámetro `productor=...` (el alias va embebido en la URL → no hace
+// falta agregarlo al copy). Inviu usa la misma URL para todos los asesores
+// y necesita el alias EN EL TEXTO COPIADO para que el onboarding identifique
+// al productor. Por eso `withAlias: true` en los Inviu y false en PPI.
+//
+// Si urls[asesor] es null, la fila aparece deshabilitada con leyenda
+// "PRÓXIMAMENTE".
 const APERTURAS = [
   {
     key: 'local',
     title: 'INVIU LOCAL',
     subtitle: 'Cuenta local · BYMA',
-    url: 'https://inversor.inviu.com.ar/register',
+    urls: {
+      delfino: 'https://inversor.inviu.com.ar/register',
+      gavina:  'https://inversor.inviu.com.ar/register',
+      hary:    null,
+    },
+    withAlias: true,
     color: '#22C55E', // verde — mismo que backend INVIU en LINKS ÚTILES
+  },
+  {
+    key: 'ppi-local',
+    title: 'PPI LOCAL',
+    subtitle: 'Cuenta local · Portfolio Personal',
+    urls: {
+      delfino: 'https://cuenta.portfoliopersonal.com/abrirCuenta?productor=TFE6NVFpZF9fW1E2RHg1QD82QFFpRUNGNltRO0ZDOjU6NDJRaTcyPUQ2W1E0NDZDMlFpNzI9RDZO',
+      gavina:  'https://cuenta.portfoliopersonal.com/abrirCuenta?productor=TFE6NVFpZF9gW1E2RHg1QD82QFFpRUNGNltRO0ZDOjU6NDJRaTcyPUQ2W1E0NDZDMlFpNzI9RDZO',
+      hary:    null,
+    },
+    withAlias: false, // el productor ya viene embebido en el URL
+    color: '#06B6D4', // celeste — diferencia clara contra el verde de Inviu local
   },
   {
     key: 'pershing',
     title: 'INVIU PERSHING',
     subtitle: 'Offshore · Pershing (NY)',
-    url: 'https://onboarding.pershing.inviu.com.uy/human',
+    urls: {
+      delfino: 'https://onboarding.pershing.inviu.com.uy/human',
+      gavina:  'https://onboarding.pershing.inviu.com.uy/human',
+      hary:    null,
+    },
+    withAlias: true,
     color: '#3B82F6', // azul institucional
   },
   {
     key: 'ibkr',
     title: 'INVIU IBKR',
     subtitle: 'Offshore · Interactive Brokers',
-    url: 'https://onboarding.ibkr.inviu.com.uy/human',
+    urls: {
+      delfino: 'https://onboarding.ibkr.inviu.com.uy/human',
+      gavina:  'https://onboarding.ibkr.inviu.com.uy/human',
+      hary:    null,
+    },
+    withAlias: true,
     color: '#8B5CF6', // violeta — distingue de los otros dos
   },
 ];
 
-// Alias según asesor. Sin tildes (copy-paste robusto) y en MAYÚSCULAS, como
-// se usan en el flow real de onboarding.
-const ALIAS_BY_ASESOR = {
-  delfino: 'DELFINO.INVIU',
-  gavina:  'GAVINA.INVIU',
-};
+// Asesores soportados — orden = orden visual del segmented control.
+// `alias` es el texto que se concatena al URL en los flows de Inviu (no en PPI).
+const ASESORES = [
+  { key: 'delfino', label: 'DELFINO', alias: 'DELFINO.INVIU' },
+  { key: 'gavina',  label: 'GAVIÑA',  alias: 'GAVINA.INVIU' },
+  { key: 'hary',    label: 'HARY BV', alias: '' /* TBD */ },
+];
 
 function AperturasCard() {
   const [hover, setHover] = useState(false);
-  // Asesor seleccionado: 'delfino' | 'gavina'. Persiste en localStorage para
-  // que cada usuario vuelva con su preferencia ya seteada.
+  // Asesor seleccionado: 'delfino' | 'gavina' | 'hary'. Persiste en
+  // localStorage para que cada usuario vuelva con su preferencia.
   const [asesor, setAsesor] = useState(() => {
-    try { return localStorage.getItem('hp_aperturas_asesor') || 'delfino'; }
-    catch { return 'delfino'; }
+    try {
+      const saved = localStorage.getItem('hp_aperturas_asesor');
+      return ASESORES.some(a => a.key === saved) ? saved : 'delfino';
+    } catch { return 'delfino'; }
   });
   useEffect(() => {
     try { localStorage.setItem('hp_aperturas_asesor', asesor); } catch {}
@@ -489,12 +525,16 @@ function AperturasCard() {
 
   useEffect(() => () => { if (copyTimerRef.current) clearTimeout(copyTimerRef.current); }, []);
 
-  const alias = ALIAS_BY_ASESOR[asesor];
-
   const handleCopy = async (cfg) => {
-    const text = `${cfg.url}\nAlias asesor: ${alias}`;
-    // Preferimos Clipboard API; fallback a textarea + execCommand por si
-    // el contexto no es seguro (http://localhost con ciertos browsers).
+    const url = cfg.urls?.[asesor];
+    if (!url) return; // apertura no disponible para este asesor
+    // Texto a copiar: si la apertura usa alias (Inviu), concatenamos
+    // "Alias asesor: <ALIAS>" abajo del URL. PPI no lo necesita (productor
+    // ya embebido en la URL).
+    const aliasInfo = ASESORES.find(a => a.key === asesor);
+    const text = (cfg.withAlias && aliasInfo?.alias)
+      ? `${url}\nAlias asesor: ${aliasInfo.alias}`
+      : url;
     try {
       if (navigator.clipboard?.writeText) {
         await navigator.clipboard.writeText(text);
@@ -511,11 +551,15 @@ function AperturasCard() {
       if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
       copyTimerRef.current = setTimeout(() => setCopiedKey(null), 1500);
     } catch {
-      // Si todo falla, al menos no rompemos: dejamos el "COPIADO" sin setear.
+      /* silencioso — no rompemos UI si falla el clipboard */
     }
   };
 
   const cardStyle = { ...S.card, ...(hover ? S.cardHover : {}) };
+
+  // Posición del thumb del segmented control: cada asesor ocupa 1/N del ancho.
+  const asesorIdx = Math.max(0, ASESORES.findIndex(a => a.key === asesor));
+  const thumbWidthPct = 100 / ASESORES.length;
 
   return (
     <div
@@ -526,71 +570,73 @@ function AperturasCard() {
       <div style={S.cardHeader}>
         <div>
           <div style={S.cardTitle}>APERTURAS</div>
-          <div style={S.cardSub}>Copiar link + alias asesor</div>
+          <div style={S.cardSub}>Copiar link de onboarding</div>
         </div>
       </div>
 
-      {/* Interruptor DELFINO / GAVIÑA — segmented control con slider animado. */}
-      <div style={S.asesorSwitch} role="tablist" aria-label="Asesor">
+      {/* Interruptor DELFINO / GAVIÑA / HARY BV — segmented control con
+          slider animado. Soporta N opciones — el thumb se ajusta a 100/N% */}
+      <div
+        style={{ ...S.asesorSwitch, gridTemplateColumns: `repeat(${ASESORES.length}, 1fr)` }}
+        role="tablist"
+        aria-label="Asesor"
+      >
         <div
           style={{
             ...S.asesorSwitchThumb,
-            transform: asesor === 'gavina' ? 'translateX(100%)' : 'translateX(0%)',
+            width: `calc(${thumbWidthPct}% - 3px)`,
+            transform: `translateX(${asesorIdx * 100}%)`,
           }}
         />
-        <button
-          type="button"
-          role="tab"
-          aria-selected={asesor === 'delfino'}
-          style={{ ...S.asesorSwitchBtn, ...(asesor === 'delfino' ? S.asesorSwitchBtnActive : {}) }}
-          onClick={() => setAsesor('delfino')}
-        >
-          DELFINO
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={asesor === 'gavina'}
-          style={{ ...S.asesorSwitchBtn, ...(asesor === 'gavina' ? S.asesorSwitchBtnActive : {}) }}
-          onClick={() => setAsesor('gavina')}
-        >
-          GAVIÑA
-        </button>
-      </div>
-
-      <div style={S.asesorAliasRow}>
-        <span style={S.asesorAliasLabel}>ALIAS ACTIVO</span>
-        <span style={S.asesorAliasValue}>{alias}</span>
+        {ASESORES.map(a => (
+          <button
+            key={a.key}
+            type="button"
+            role="tab"
+            aria-selected={asesor === a.key}
+            style={{ ...S.asesorSwitchBtn, ...(asesor === a.key ? S.asesorSwitchBtnActive : {}) }}
+            onClick={() => setAsesor(a.key)}
+          >
+            {a.label}
+          </button>
+        ))}
       </div>
 
       <div style={S.aperturasList}>
-        {APERTURAS.map(cfg => (
-          <AperturaRow
-            key={cfg.key}
-            cfg={cfg}
-            copied={copiedKey === cfg.key}
-            onCopy={() => handleCopy(cfg)}
-          />
-        ))}
+        {APERTURAS.map(cfg => {
+          const url = cfg.urls?.[asesor];
+          return (
+            <AperturaRow
+              key={cfg.key}
+              cfg={cfg}
+              url={url}
+              copied={copiedKey === cfg.key}
+              onCopy={() => handleCopy(cfg)}
+            />
+          );
+        })}
       </div>
     </div>
   );
 }
 
-function AperturaRow({ cfg, copied, onCopy }) {
+function AperturaRow({ cfg, url, copied, onCopy }) {
   const [hover, setHover] = useState(false);
   const accent = cfg.color;
+  const disabled = !url;
   const rowStyle = {
     ...S.aperturaRow,
-    borderColor: hover || copied ? accent : 'var(--border)',
-    borderLeft: `3px solid ${accent}`,
-    ...(hover
+    borderColor: !disabled && (hover || copied) ? accent : 'var(--border)',
+    borderLeft: `3px solid ${disabled ? 'var(--border)' : accent}`,
+    cursor: disabled ? 'not-allowed' : 'pointer',
+    opacity: disabled ? 0.5 : 1,
+    ...(!disabled && hover
       ? {
           background: `linear-gradient(180deg, ${hexToRgba(accent, 0.08)} 0%, var(--bg-card) 70%)`,
           transform: 'translateX(2px)',
         }
       : {}),
-    ...(copied
+    ...(copied && !disabled
       ? { background: hexToRgba(accent, 0.14) }
       : {}),
   };
@@ -599,19 +645,20 @@ function AperturaRow({ cfg, copied, onCopy }) {
     <button
       type="button"
       style={rowStyle}
-      onClick={onCopy}
-      onMouseEnter={() => setHover(true)}
+      onClick={disabled ? undefined : onCopy}
+      onMouseEnter={() => !disabled && setHover(true)}
       onMouseLeave={() => setHover(false)}
-      title={`${cfg.url}\nClick para copiar`}
+      title={disabled ? 'Próximamente disponible para este asesor' : `${url}\nClick para copiar`}
+      disabled={disabled}
     >
       <div style={S.aperturaRowText}>
-        <span style={{ ...S.aperturaTitle, color: hover || copied ? accent : 'var(--text)' }}>
+        <span style={{ ...S.aperturaTitle, color: !disabled && (hover || copied) ? accent : 'var(--text)' }}>
           {cfg.title}
         </span>
         <span style={S.aperturaSub}>{cfg.subtitle}</span>
       </div>
-      <span style={{ ...S.aperturaStatus, color: accent }}>
-        {copied ? '✓ COPIADO' : '⧉ COPIAR'}
+      <span style={{ ...S.aperturaStatus, color: disabled ? 'var(--text-dim)' : accent }}>
+        {disabled ? 'PRÓXIMAMENTE' : (copied ? '✓ COPIADO' : '⧉ COPIAR')}
       </span>
     </button>
   );
@@ -937,6 +984,10 @@ const S = {
     transition: 'transform 0.22s ease, border-color 0.22s ease, box-shadow 0.22s ease, background 0.22s ease',
     minHeight: 360,
     overflow: 'hidden',
+    // containerType: hijos pueden usar `cqi` (% del ancho del card) — el
+    // segmented control de asesores los aprovecha para ajustar font-size
+    // según el ancho real del card y no del viewport.
+    containerType: 'inline-size',
   },
   // Hover: lift + neon glow. Se suma a S.card.
   cardHover: {
@@ -1133,24 +1184,23 @@ const S = {
   },
 
   // ── Aperturas ──
-  // Interruptor segmentado DELFINO/GAVIÑA con "thumb" que se desliza al
-  // cambiar selección. Los botones son transparentes; el thumb es una capa
-  // absoluta con transición suave.
+  // Interruptor segmentado DELFINO / GAVIÑA / HARY BV con "thumb" que se
+  // desliza al cambiar selección. gridTemplateColumns y width del thumb se
+  // computan dinámicamente en el JSX según ASESORES.length, así soporta N
+  // opciones sin tocar el CSS.
   asesorSwitch: {
     position: 'relative',
     display: 'grid',
-    gridTemplateColumns: '1fr 1fr',
     background: 'var(--bg)',
     border: '1px solid var(--border)',
     borderRadius: 6,
     padding: 3,
-    marginBottom: 10,
+    marginBottom: 14,
   },
   asesorSwitchThumb: {
     position: 'absolute',
     top: 3, bottom: 3,
     left: 3,
-    width: 'calc(50% - 3px)',
     background: 'var(--neon)',
     borderRadius: 4,
     transition: 'transform 0.22s cubic-bezier(0.4, 0, 0.2, 1)',
@@ -1161,12 +1211,17 @@ const S = {
     position: 'relative', zIndex: 1,
     background: 'transparent',
     border: 'none',
-    padding: '8px 10px',
+    padding: '8px 6px',
     fontFamily: "'Roboto Mono',monospace",
-    fontSize: 11, fontWeight: 700, letterSpacing: 2,
+    // Tamaño adaptativo: en cards angostas (3 asesores) las labels más largas
+    // como "HARY BV" entran sin overflow.
+    fontSize: 'clamp(9px, 1.6cqi, 11px)',
+    fontWeight: 700,
+    letterSpacing: 'clamp(1px, 0.4cqi, 2px)',
     color: 'var(--text-dim)',
     cursor: 'pointer',
     transition: 'color 0.18s',
+    whiteSpace: 'nowrap',
   },
   asesorSwitchBtnActive: {
     color: 'var(--bg)', // texto oscuro sobre el thumb neón (ambos themes)

@@ -374,6 +374,19 @@ function RatioPanel({ title, formula, color, dataKey, decimals, isPercent, yStep
     try {
       // Esperar 2 frames para que React commitee el DOM con header/footer.
       await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+      // CRÍTICO: esperar a que TODAS las <img> dentro del panel estén
+      // completamente cargadas. Si html2canvas dispara antes de que el
+      // browser termine de decodificar el PNG del logo, captura un placeholder
+      // o lo escala desde un cache previo de baja calidad → logo borroso.
+      const imgs = Array.from(panelRef.current.querySelectorAll('img'));
+      await Promise.all(imgs.map(img => (img.complete && img.naturalHeight > 0)
+        ? Promise.resolve()
+        : new Promise(res => {
+            const done = () => res();
+            img.addEventListener('load', done, { once: true });
+            img.addEventListener('error', done, { once: true });
+          })
+      ));
       // Lazy load de html2canvas (mismo pattern que FxHistoryChart).
       if (!window.html2canvas) {
         await new Promise((res, rej) => {
@@ -385,11 +398,15 @@ function RatioPanel({ title, formula, color, dataKey, decimals, isPercent, yStep
         });
       }
       const bg = getComputedStyle(document.documentElement).getPropertyValue('--bg-card').trim() || '#0d1424';
+      // scale: 3 (antes 2) → PNG resultante con más densidad de píxeles, así
+      // el logo se ve nítido en pantallas retina + cuando el destino lo
+      // re-escala (WhatsApp, Slack, Teams).
       const canvas = await window.html2canvas(panelRef.current, {
         backgroundColor: bg,
-        scale: 2,
+        scale: 3,
         useCORS: true,
         logging: false,
+        imageTimeout: 8000,
       });
       const blob = await new Promise(res => canvas.toBlob(res, 'image/png'));
       if (!blob) throw new Error('No se pudo generar imagen');

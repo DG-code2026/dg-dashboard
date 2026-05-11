@@ -139,16 +139,19 @@ export default function TradeTrackingPage({ marketData = {}, primaryConnected = 
   const visibleTrades = useMemo(() => filterTag === 'ALL' ? trades : trades.filter(t => t.tag === filterTag), [trades, filterTag]);
 
   const handleCreate = async (data) => {
-    await fetch(`${API}/api/db/trades`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+    const r = await fetch(`${API}/api/db/trades`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+    if (!r.ok) { alert('No se pudo guardar el trade.\n\n' + (await r.text())); return; }
     setShowForm(false); fetchTrades();
   };
   const handleUpdate = async (id, data) => {
-    await fetch(`${API}/api/db/trades/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+    const r = await fetch(`${API}/api/db/trades/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+    if (!r.ok) { alert('No se pudo actualizar el trade.\n\n' + (await r.text())); return; }
     setEditTrade(null); fetchTrades();
   };
   const handleDelete = async (id) => {
     if (!confirm('¿Eliminar este trade?')) return;
-    await fetch(`${API}/api/db/trades/${id}`, { method: 'DELETE' });
+    const r = await fetch(`${API}/api/db/trades/${id}`, { method: 'DELETE' });
+    if (!r.ok) { alert('No se pudo eliminar.\n\n' + (await r.text())); return; }
     fetchTrades();
   };
 
