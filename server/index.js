@@ -6,6 +6,7 @@ import http from 'http';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import twilio from 'twilio';
+import cron from 'node-cron';
 import { httpJson, singleflight, HttpError } from './lib/http.js';
 
 const app = express();
@@ -688,57 +689,111 @@ async function sendWhatsApp(to, body) {
   return client.messages.create(payload);
 }
 
+// Retry con backoff exponencial — sólo reintenta errores transient (network,
+// 5xx, 429). Errores 4xx (número inválido, opt-in faltante) NO se reintentan
+// porque van a fallar igual.
+async function sendWhatsAppWithRetry(to, body, maxAttempts = 3) {
+  let lastErr;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await sendWhatsApp(to, body);
+    } catch (e) {
+      lastErr = e;
+      const status = e?.status || e?.code;
+      const transient = !status || status >= 500 || status === 429 || /timeout|network/i.test(String(e?.message));
+      if (!transient || attempt === maxAttempts) throw e;
+      const delay = Math.min(1000 * 2 ** (attempt - 1), 8000);
+      console.warn(`[whatsapp] intento ${attempt} a ${to} falló (${e.message}). Reintento en ${delay}ms`);
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+  throw lastErr;
+}
+
+// Lógica del job — se invoca tanto desde node-cron como desde el endpoint
+// HTTP manual. `opts.dry` previsualiza sin enviar. `opts.only` filtra asesores.
+async function runBirthdayJob(opts = {}) {
+  const clientes = await fetchBirthdaysToday();
+  if (clientes.length === 0) {
+    return { ok: true, sent: 0, total: 0, reason: 'no birthdays today', date: todayInArgentina() };
+  }
+  const byAdvisor = {};
+  for (const c of clientes) {
+    const key = normAsesor(c.asesor);
+    (byAdvisor[key] ||= []).push(c);
+  }
+  if (opts.only) {
+    const allowed = new Set(String(opts.only).split(',').map(s => normAsesor(s)));
+    for (const k of Object.keys(byAdvisor)) {
+      if (!allowed.has(k)) delete byAdvisor[k];
+    }
+  }
+  const results = [];
+  for (const [advisorKey, list] of Object.entries(byAdvisor)) {
+    const to = ADVISOR_TO_WHATSAPP[advisorKey];
+    const body = buildBirthdayMessage(list);
+    if (!to) {
+      results.push({ asesor: advisorKey, count: list.length, status: 'skipped', reason: 'no whatsapp configured' });
+      continue;
+    }
+    if (opts.dry) {
+      results.push({ asesor: advisorKey, count: list.length, status: 'dry-run', to, body });
+      continue;
+    }
+    try {
+      const m = await sendWhatsAppWithRetry(to, body);
+      results.push({ asesor: advisorKey, count: list.length, status: 'sent', to, sid: m.sid });
+    } catch (e) {
+      console.error(`[cron whatsapp] error final mandando a ${advisorKey} (${to}):`, e.message);
+      results.push({ asesor: advisorKey, count: list.length, status: 'error', to, error: e.message });
+    }
+  }
+  return { ok: true, date: todayInArgentina(), total: clientes.length, results };
+}
+
 app.post('/api/cron/birthday-whatsapp', async (req, res) => {
-  // Auth: header o query param (cron-job.org soporta ambos)
   const provided = req.headers['x-cron-secret'] || req.query.secret || '';
   if (!CRON_SECRET || provided !== CRON_SECRET) {
     return res.status(401).json({ error: 'unauthorized' });
   }
-  const dry = req.query.dry === '1' || req.query.dry === 'true';
   try {
-    const clientes = await fetchBirthdaysToday();
-    if (clientes.length === 0) {
-      return res.json({ ok: true, sent: 0, reason: 'no birthdays today' });
-    }
-    // Agrupar por asesor normalizado
-    const byAdvisor = {};
-    for (const c of clientes) {
-      const key = normAsesor(c.asesor);
-      (byAdvisor[key] ||= []).push(c);
-    }
-    // Filtro opcional ?only=DELFINO,GAVINA — útil para tests selectivos
-    if (req.query.only) {
-      const allowed = new Set(String(req.query.only).split(',').map(s => normAsesor(s)));
-      for (const k of Object.keys(byAdvisor)) {
-        if (!allowed.has(k)) delete byAdvisor[k];
-      }
-    }
-    const results = [];
-    for (const [advisorKey, list] of Object.entries(byAdvisor)) {
-      const to = ADVISOR_TO_WHATSAPP[advisorKey];
-      const body = buildBirthdayMessage(list);
-      if (!to) {
-        results.push({ asesor: advisorKey, count: list.length, status: 'skipped', reason: 'no whatsapp configured' });
-        continue;
-      }
-      if (dry) {
-        results.push({ asesor: advisorKey, count: list.length, status: 'dry-run', to, body });
-        continue;
-      }
-      try {
-        const m = await sendWhatsApp(to, body);
-        results.push({ asesor: advisorKey, count: list.length, status: 'sent', to, sid: m.sid });
-      } catch (e) {
-        console.error(`[cron whatsapp] error mandando a ${advisorKey} (${to}):`, e.message);
-        results.push({ asesor: advisorKey, count: list.length, status: 'error', to, error: e.message });
-      }
-    }
-    res.json({ ok: true, date: todayInArgentina(), total: clientes.length, results });
+    const r = await runBirthdayJob({
+      dry:  req.query.dry === '1' || req.query.dry === 'true',
+      only: req.query.only,
+    });
+    res.json(r);
   } catch (e) {
     console.error('[cron whatsapp] fatal:', e);
     res.status(500).json({ error: e.message });
   }
 });
+
+// Scheduler interno (node-cron) — 9 AM hora Argentina, todos los días.
+// Si el server está vivo, no necesita ningún disparador externo.
+cron.schedule('0 9 * * *', async () => {
+  console.log('[node-cron] disparo birthday whatsapp', new Date().toISOString());
+  try {
+    const r = await runBirthdayJob();
+    console.log('[node-cron] resultado:', JSON.stringify(r));
+  } catch (e) {
+    console.error('[node-cron] fallo:', e);
+  }
+}, { timezone: 'America/Argentina/Buenos_Aires' });
+
+// Self-ping para que Render free tier no duerma el servicio. Cada 13 min
+// hacemos un GET a /api/health → resetea el contador de inactividad.
+// Render setea RENDER_EXTERNAL_URL automáticamente cuando estás deployado.
+// Localmente esto no se activa.
+const SELF_PING_URL = process.env.RENDER_EXTERNAL_URL
+  ? `${process.env.RENDER_EXTERNAL_URL}/api/health`
+  : process.env.SELF_PING_URL || null;
+if (SELF_PING_URL) {
+  console.log(`[self-ping] activado: ${SELF_PING_URL} cada 13 min`);
+  cron.schedule('*/13 * * * *', async () => {
+    try { await fetch(SELF_PING_URL); }
+    catch (e) { console.warn('[self-ping] error:', e.message); }
+  });
+}
 
 // ══════════════════════════════════════════════
 //  PPI API
