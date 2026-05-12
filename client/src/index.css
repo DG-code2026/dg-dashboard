@@ -247,3 +247,11 @@ body { font-family: 'Montserrat', sans-serif; background: var(--bg); color: var(
 /* Oculta la scrollbar en contenedores con overflow — mantiene el scroll funcional. */
 .no-scrollbar { scrollbar-width: none; -ms-overflow-style: none; }
 .no-scrollbar::-webkit-scrollbar { display: none; width: 0; height: 0; }
+
+/* News ticker — marquee continuo. La duración se setea por JS según el ancho
+   real. Al hover pausamos para que el usuario pueda leer/clickear cómodo. */
+@keyframes news-marquee {
+  from { transform: translateX(0); }
+  to   { transform: translateX(-50%); }
+}
+.news-viewport:hover .news-track { animation-play-state: paused; }

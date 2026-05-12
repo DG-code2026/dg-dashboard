@@ -95,7 +95,8 @@
       "Bash(node -e \"console.log\\(require\\('crypto'\\).randomBytes\\(32\\).toString\\('hex'\\)\\)\")",
       "Bash(python -c ' *)",
       "Bash(curl -s -w \"\\\\nHTTP %{http_code}\\\\n\" -X POST \"http://localhost:3099/api/cron/birthday-whatsapp\")",
-      "Bash(curl -s -w \"\\\\nHTTP %{http_code}\\\\n\" -X POST \"http://localhost:3099/api/cron/birthday-whatsapp\" -H \"X-Cron-Secret: wrong\")"
+      "Bash(curl -s -w \"\\\\nHTTP %{http_code}\\\\n\" -X POST \"http://localhost:3099/api/cron/birthday-whatsapp\" -H \"X-Cron-Secret: wrong\")",
+      "Bash(curl -s http://localhost:3099/api/news)"
     ]
   }
 }

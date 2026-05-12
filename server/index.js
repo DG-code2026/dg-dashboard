@@ -7,6 +7,7 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import twilio from 'twilio';
 import cron from 'node-cron';
+import Parser from 'rss-parser';
 import { httpJson, singleflight, HttpError } from './lib/http.js';
 
 const app = express();
@@ -794,6 +795,163 @@ if (SELF_PING_URL) {
     catch (e) { console.warn('[self-ping] error:', e.message); }
   });
 }
+
+// ══════════════════════════════════════════════
+//  NEWS — agrega varios RSS y devuelve titulares unificados
+//
+//  Polea N feeds en paralelo, mergea por fecha, cachea 5 min en memoria.
+//  Si un feed falla, los otros siguen. El cliente refresca cada 2-3 min;
+//  como el cache es de 5 min, varios clientes comparten la misma respuesta.
+// ══════════════════════════════════════════════
+const rssParser = new Parser({
+  timeout: 6000,
+  headers: { 'User-Agent': 'Mozilla/5.0 (compatible; DGDashboard/1.0)' },
+});
+
+// Cada feed declara su peso editorial (0-10) y el sesgo de categoría que
+// asumimos por default. El categorizador después afina por keywords del
+// título y puede sobrescribirlo. Bloomberg/Reuters/WSJ no exponen RSS
+// público abierto, los traemos vía Google News con `site:`.
+const NEWS_FEEDS = [
+  // Mundo — prestigio top (mercados/economía/política internacional)
+  { name: 'Bloomberg',   url: 'https://news.google.com/rss/search?q=site:bloomberg.com&hl=es-419&gl=US&ceid=US:es-419', weight: 10, country: 'WORLD', defaultCat: 'markets' },
+  { name: 'Reuters',     url: 'https://news.google.com/rss/search?q=site:reuters.com&hl=es-419&gl=US&ceid=US:es-419',   weight: 10, country: 'WORLD', defaultCat: 'markets' },
+  { name: 'WSJ',         url: 'https://news.google.com/rss/search?q=site:wsj.com&hl=es-419&gl=US&ceid=US:es-419',       weight: 9,  country: 'WORLD', defaultCat: 'markets' },
+  { name: 'Financial Times', url: 'https://news.google.com/rss/search?q=site:ft.com&hl=es-419&gl=US&ceid=US:es-419',    weight: 9,  country: 'WORLD', defaultCat: 'markets' },
+  { name: 'BBC Mundo',   url: 'https://feeds.bbci.co.uk/mundo/rss.xml',                                                 weight: 7,  country: 'WORLD', defaultCat: 'general' },
+  // Argentina — economía/mercados primero (prestigio editorial alto)
+  { name: 'Cronista',    url: 'https://news.google.com/rss/search?q=site:cronista.com&hl=es-419&gl=AR&ceid=AR:es-419',  weight: 8,  country: 'AR',    defaultCat: 'markets' },
+  { name: 'Ámbito',      url: 'https://www.ambito.com/rss/pages/economia.xml',                                          weight: 8,  country: 'AR',    defaultCat: 'markets' },
+  { name: 'BAE',         url: 'https://news.google.com/rss/search?q=site:baenegocios.com&hl=es-419&gl=AR&ceid=AR:es-419', weight: 7, country: 'AR',  defaultCat: 'markets' },
+  // Argentina — generales (filtramos deporte/farándula por título)
+  { name: 'La Nación',   url: 'https://www.lanacion.com.ar/arc/outboundfeeds/rss/',                                     weight: 6,  country: 'AR',    defaultCat: 'general' },
+  { name: 'Infobae',     url: 'https://news.google.com/rss/search?q=site:infobae.com&hl=es-419&gl=AR&ceid=AR:es-419',   weight: 6,  country: 'AR',    defaultCat: 'general' },
+  { name: 'Perfil',      url: 'https://www.perfil.com/feed',                                                            weight: 5,  country: 'AR',    defaultCat: 'politics' },
+  // Búsquedas temáticas (mercados/política AR) — más ranking, menos ruido
+  { name: 'Mercados AR', url: 'https://news.google.com/rss/search?q=mercados+OR+bolsa+OR+merval+OR+bonos+OR+d%C3%B3lar&hl=es-419&gl=AR&ceid=AR:es-419',    weight: 7, country: 'AR', defaultCat: 'markets' },
+  { name: 'Política AR', url: 'https://news.google.com/rss/search?q=Milei+OR+gobierno+OR+congreso+OR+senado&hl=es-419&gl=AR&ceid=AR:es-419',                weight: 6, country: 'AR', defaultCat: 'politics' },
+];
+
+// Patrones para filtrar deporte/farándula/policiales y para detectar política /
+// mercados. Aplicados al título minúscula.
+const RE_EXCLUDE = /\b(f[uú]tbol|f[uú]tbolista|gol(es)?|partid[oa]|jugador|jugadora|tenis|f[oó]rmula\s?1|f1|moto\s?gp|atleta|atletismo|nba|nfl|olimp|mundial\s?(\d|sub|fifa)|copa\s?(am[eé]rica|libertadores|sudamericana|davis)|liga\s?(profesional|premier|italiana|española|argentina|mx)|boca\b|river\b|racing\b|independiente\b|messi\b|maradona\b|farandula|far[aá]ndula|chimentos?|gran\s?hermano|reality|trending|recetas?|hor[oó]scopo|recital|cantante|actriz|netflix|spotify|telenovela|hincha|polic[ií]a|crimen|crimin|asesin|homicid|robo\b|muerte\b|fallec|verificaci[oó]n|fact[\s-]?check|chequeo|desinformaci[oó]n)/i;
+const RE_POLITICS = /\b(milei|cristina|kicillof|caputo|gobierno|congreso|senado|diputado|elecci[oó]n|kirchner|macri|massa|cfk|presidente|presidencial|pliego|ministr|peronist|libertari|kirchnerist|opositor|oficialis|fmi|fondo\s?monetario)\b/i;
+const RE_MARKETS  = /\b(d[oó]lar|blue|mep|ccl|merval|bolsa|bonos?|riesgo\s?pa[ií]s|inflaci[oó]n|fed|tasa|wall\s?street|nasdaq|s&p|sp500|dow\s?jones|cedear|ypf|galicia|pampa|tesla|nvidia|petr[oó]leo|oro|cripto|bitcoin|eth|btc|acci[oó]n|emisi[oó]n|reservas?|bcra|d[eé]ficit|super[aá]vit|cny|yuan|euro|brent|wti)\b/i;
+
+let newsCache = { fetchedAt: 0, items: [] };
+const NEWS_CACHE_MS = 5 * 60 * 1000;
+
+// Para feeds temáticos (Mercados AR / Política AR) exigimos que el título
+// matchee su tema — si no, es ruido del agregador y lo descartamos.
+const TOPIC_REQUIRED = {
+  'Mercados AR': RE_MARKETS,
+  'Política AR': RE_POLITICS,
+};
+
+// Determina la categoría final. El default del feed se usa si el título no
+// matchea ningún tema. Para feeds de prestigio internacional, las notas que
+// no son de mercado/política igual se mantienen como 'general' (no se tiran).
+function categorize(title, defaultCat) {
+  const t = title.toLowerCase();
+  if (RE_MARKETS.test(t))  return 'markets';
+  if (RE_POLITICS.test(t)) return 'politics';
+  // Si el feed dice "markets" pero el título no es de mercado, mejor 'general'
+  // para no ensuciar la sección de markets con ruido.
+  return defaultCat === 'markets' ? 'general' : (defaultCat || 'general');
+}
+
+async function fetchOneFeed(feed) {
+  try {
+    const parsed = await rssParser.parseURL(feed.url);
+    const required = TOPIC_REQUIRED[feed.name];
+    return (parsed.items || []).map(it => {
+      const title = (it.title || '').trim();
+      const t = title.toLowerCase();
+      if (!title || !it.link) return null;
+      if (RE_EXCLUDE.test(t)) return null;
+      if (required && !required.test(t)) return null;  // feed temático sin match → descartar
+      const cat = categorize(title, feed.defaultCat);
+      const catBonus = cat === 'markets' ? 4 : cat === 'politics' ? 3 : 0;
+      return {
+        title,
+        link:    it.link || '',
+        source:  feed.name,
+        country: feed.country,
+        category: cat,
+        date:    it.isoDate || it.pubDate || null,
+        _baseScore: (feed.weight || 5) + catBonus,
+      };
+    }).filter(Boolean);
+  } catch (e) {
+    console.warn(`[news] ${feed.name} falló: ${e.message}`);
+    return [];
+  }
+}
+
+async function refreshNews() {
+  const lists = await Promise.all(NEWS_FEEDS.map(fetchOneFeed));
+  const now = Date.now();
+  const HOUR_MS = 3600_000;
+
+  // HARD CUTOFF de antigüedad. Empezamos pidiendo 24h, si quedan pocas
+  // ampliamos a 48h, etc. Items sin fecha O con fechas absurdas (>30 días
+  // atrás, o más de 1h en el futuro por TZ) se descartan siempre.
+  const withDate = lists.flat().filter(x => {
+    if (!x.date) return false;
+    const t = new Date(x.date).getTime();
+    if (!Number.isFinite(t)) return false;
+    const ageH = (now - t) / HOUR_MS;
+    return ageH > -1 && ageH < 24 * 30;  // -1h (futuro chico) a 30 días
+  });
+
+  let maxAgeH = 24;
+  let pool = withDate.filter(x => (now - new Date(x.date).getTime()) / HOUR_MS <= maxAgeH);
+  if (pool.length < 10) { maxAgeH = 48; pool = withDate.filter(x => (now - new Date(x.date).getTime()) / HOUR_MS <= maxAgeH); }
+  if (pool.length < 10) { maxAgeH = 72; pool = withDate.filter(x => (now - new Date(x.date).getTime()) / HOUR_MS <= maxAgeH); }
+
+  // Score final: base (fuente+categoría) + bonus de recencia.
+  for (const it of pool) {
+    const ageH = Math.max(0, (now - new Date(it.date).getTime()) / HOUR_MS);
+    const recencyBonus = Math.max(0, 5 - ageH / 5);
+    it.score = it._baseScore + recencyBonus;
+    delete it._baseScore;
+  }
+  const all = pool;
+
+  // Dedup por título + cap por fuente: max 6 items por medio para forzar
+  // diversidad (sino un solo feed con muchas notas opaca a los prestigiosos).
+  const seenKeys = new Set();
+  const perSource = {};
+  const PER_SOURCE_CAP = 6;
+  const dedup = [];
+  for (const it of all.sort((a, b) => b.score - a.score)) {
+    const key = it.title.toLowerCase().replace(/\W+/g, '').slice(0, 60);
+    if (seenKeys.has(key)) continue;
+    if ((perSource[it.source] || 0) >= PER_SOURCE_CAP) continue;
+    seenKeys.add(key);
+    perSource[it.source] = (perSource[it.source] || 0) + 1;
+    dedup.push(it);
+  }
+
+  newsCache = { fetchedAt: now, items: dedup.slice(0, 60) };
+  return newsCache.items;
+}
+
+app.get('/api/news', async (_req, res) => {
+  try {
+    const age = Date.now() - newsCache.fetchedAt;
+    if (newsCache.items.length === 0 || age > NEWS_CACHE_MS) {
+      await refreshNews();
+    }
+    res.json({ items: newsCache.items, fetchedAt: newsCache.fetchedAt });
+  } catch (e) {
+    console.error('[news] fatal:', e);
+    res.status(500).json({ error: e.message, items: [] });
+  }
+});
+
+// Pre-warm al boot para que el primer cliente no espere
+refreshNews().catch(() => {});
 
 // ══════════════════════════════════════════════
 //  PPI API

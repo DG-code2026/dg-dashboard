@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { createPortal } from 'react-dom';
+import NewsTicker from './NewsTicker';
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  HOME — DASHBOARD 2×2
@@ -115,12 +116,15 @@ function currencyTag(c) {
 
 export default function HomePage() {
   return (
-    <div style={S.grid}>
-      <AperturasCard />
-      <LinksUtilesCard />
-      <ProximosPagosCard />
-      <DiasHabilesCard />
-    </div>
+    <>
+      <NewsTicker />
+      <div style={S.grid}>
+        <AperturasCard />
+        <LinksUtilesCard />
+        <ProximosPagosCard />
+        <DiasHabilesCard />
+      </div>
+    </>
   );
 }
 
