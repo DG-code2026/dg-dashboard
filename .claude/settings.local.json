@@ -96,7 +96,14 @@
       "Bash(python -c ' *)",
       "Bash(curl -s -w \"\\\\nHTTP %{http_code}\\\\n\" -X POST \"http://localhost:3099/api/cron/birthday-whatsapp\")",
       "Bash(curl -s -w \"\\\\nHTTP %{http_code}\\\\n\" -X POST \"http://localhost:3099/api/cron/birthday-whatsapp\" -H \"X-Cron-Secret: wrong\")",
-      "Bash(curl -s http://localhost:3099/api/news)"
+      "Bash(curl -s http://localhost:3099/api/news)",
+      "WebFetch(domain:www.twilio.com)",
+      "Bash(curl -s \"http://localhost:3099/api/fx/intraday\")",
+      "Bash(curl -s -X POST \"http://localhost:3099/api/fx/intraday/save?force=1\")",
+      "Bash(curl -s --max-time 30 https://dg-dashboard-o3yo.onrender.com/api/health)",
+      "Bash(curl -s --max-time 30 \"https://dg-dashboard-o3yo.onrender.com/api/quote/AL30\")",
+      "Bash(curl -s http://localhost:3099/api/diag/primary)",
+      "Bash(python -m json.tool)"
     ]
   }
 }

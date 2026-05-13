@@ -70,29 +70,34 @@ export default function DollarRates({ data, commission, market }) {
     const prevCanjeC = al30c.close && al30d.close ? (al30c.close / al30d.close) - 1 : null;
     const prevCanjeV = al30d.close && al30c.close ? (al30d.close / al30c.close) - 1 : null;
 
-    const mCS = al30.offer / al30d.bid;
-    const mVS = al30.bid / al30d.offer;
-    const cCS = al30.offer / al30c.bid;
-    const cVS = al30.bid / al30c.offer;
-    const jCS = (al30c.bid / al30d.offer) - 1;
-    const jVS = (al30d.bid / al30c.offer) - 1;
+    // Convención bancaria (consistente con el dólar oficial):
+    //   COMPRA = precio al que el agente COMPRA dólares al cliente
+    //           (cliente VENDE → recibe ARS) → usa al30.bid / al30d.offer
+    //   VENTA  = precio al que el agente VENDE dólares al cliente
+    //           (cliente COMPRA → paga ARS) → usa al30.offer / al30d.bid
+    // Así compra < venta (siempre), idéntico a oficial y a todos los sitios
+    // financieros AR. Antes estaba invertido (perspectiva del cliente), lo
+    // que confundía vs la línea del oficial mostrada arriba.
+    const mC_sin = al30.bid / al30d.offer;     // compra MEP (sin comisión)
+    const mV_sin = al30.offer / al30d.bid;     // venta MEP (sin comisión)
+    const cC_sin = al30.bid / al30c.offer;     // compra CCL
+    const cV_sin = al30.offer / al30c.bid;     // venta CCL
+    const jC_sin = (al30d.bid / al30c.offer) - 1;   // canje MEP→CCL "compra"
+    const jV_sin = (al30c.bid / al30d.offer) - 1;   // canje CCL→MEP "venta"
 
-    // Canje: comisión completa en AMBAS patas (compra de un bono + venta del
-    // otro) → idéntico criterio que MEP/CCL y que la calculadora de rotaciones.
-    // Antes se usaba media comisión en cada lado, lo que daba comisión total ≈
-    // "c" en vez de "2·c", sub-reportando el costo del canje real.
+    // Comisión completa en AMBAS patas (compra de un bono + venta del otro).
     return {
       mep: {
-        compra: { sin: mCS, con: (al30.offer * (1 + c)) / (al30d.bid * (1 - c)), var: prevMep ? (mCS - prevMep) / prevMep : null },
-        venta: { sin: mVS, con: (al30.bid * (1 - c)) / (al30d.offer * (1 + c)), var: prevMep ? (mVS - prevMep) / prevMep : null },
+        compra: { sin: mC_sin, con: (al30.bid * (1 - c)) / (al30d.offer * (1 + c)), var: prevMep ? (mC_sin - prevMep) / prevMep : null },
+        venta:  { sin: mV_sin, con: (al30.offer * (1 + c)) / (al30d.bid * (1 - c)), var: prevMep ? (mV_sin - prevMep) / prevMep : null },
       },
       ccl: {
-        compra: { sin: cCS, con: (al30.offer * (1 + c)) / (al30c.bid * (1 - c)), var: prevCcl ? (cCS - prevCcl) / prevCcl : null },
-        venta: { sin: cVS, con: (al30.bid * (1 - c)) / (al30c.offer * (1 + c)), var: prevCcl ? (cVS - prevCcl) / prevCcl : null },
+        compra: { sin: cC_sin, con: (al30.bid * (1 - c)) / (al30c.offer * (1 + c)), var: prevCcl ? (cC_sin - prevCcl) / prevCcl : null },
+        venta:  { sin: cV_sin, con: (al30.offer * (1 + c)) / (al30c.bid * (1 - c)), var: prevCcl ? (cV_sin - prevCcl) / prevCcl : null },
       },
       canje: {
-        compra: { sin: jCS, con: ((al30c.bid * (1 - c)) / (al30d.offer * (1 + c))) - 1, var: prevCanjeC != null ? jCS - prevCanjeC : null },
-        venta: { sin: jVS, con: ((al30d.bid * (1 - c)) / (al30c.offer * (1 + c))) - 1, var: prevCanjeV != null ? jVS - prevCanjeV : null },
+        compra: { sin: jC_sin, con: ((al30d.bid * (1 - c)) / (al30c.offer * (1 + c))) - 1, var: prevCanjeV != null ? jC_sin - prevCanjeV : null },
+        venta:  { sin: jV_sin, con: ((al30c.bid * (1 - c)) / (al30d.offer * (1 + c))) - 1, var: prevCanjeC != null ? jV_sin - prevCanjeC : null },
       },
     };
   }, [data, c]);

@@ -1646,6 +1646,68 @@ wss.on('close', () => clearInterval(browserHeartbeat));
 
 app.get('/api/health', (req, res) => res.json({ status: 'ok', primary: primaryWs?.readyState === WebSocket.OPEN, supabase: !!SUPA_URL }));
 
+// Diagnóstico del estado del WS Primary y antigüedad del último Md por ticker.
+// Útil para detectar "WS zombie": readyState=OPEN pero Primary no manda Md.
+app.get('/api/diag/primary', (req, res) => {
+  const now = Date.now();
+  const states = ['CONNECTING','OPEN','CLOSING','CLOSED'];
+  const tickers = {};
+  for (const [sym, k] of Object.entries(symMap)) {
+    const d = latestData[k];
+    const lastMd = d?.timestamp || null;
+    tickers[k] = {
+      primarySymbol: sym,
+      lastMdAt: lastMd ? new Date(lastMd).toISOString() : null,
+      ageSeconds: lastMd ? Math.round((now - lastMd) / 1000) : null,
+      hasBid: d?.marketData?.BI != null,
+      hasOffer: d?.marketData?.OF != null,
+      hasLast: d?.marketData?.LA != null,
+    };
+  }
+  res.json({
+    wsState: primaryWs ? states[primaryWs.readyState] : 'NONE',
+    isAlive: primaryWs?.isAlive ?? null,
+    resolvedCount: resolved.length,
+    instrumentsLoaded: allInstruments.length,
+    browserClients: wss?.clients?.size || 0,
+    tickers,
+  });
+});
+
+// Forzar reconexión del WS de Primary (cierra y deja que el handler de close
+// re-autentique + re-suscriba). Útil para destrabar WS zombies sin redeploy.
+app.post('/api/diag/primary/reconnect', (req, res) => {
+  try {
+    if (primaryWs && primaryWs.readyState === WebSocket.OPEN) {
+      primaryWs.close();
+      res.json({ ok: true, action: 'closed (reconnect en 5s)' });
+    } else {
+      reconnect();
+      res.json({ ok: true, action: 'reconnect disparado' });
+    }
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Watchdog: si pasamos >90s sin recibir Md durante mercado abierto, asumimos
+// que el WS está zombi (readyState dice OPEN pero Primary no manda nada) y
+// forzamos reconnect. Pasa típicamente tras un cold-start de Render o si
+// Primary cortó la sesión sin avisar.
+const MD_STALE_THRESHOLD_MS = 90_000;
+setInterval(() => {
+  if (!isMarketOpen()) return;
+  if (!primaryWs || primaryWs.readyState !== WebSocket.OPEN) return;
+  // ¿Tenemos al menos 1 Md en los últimos 90s para alguno de los 3 tickers?
+  const now = Date.now();
+  const fresh = TK.some(t => {
+    const ts = latestData[t]?.timestamp;
+    return ts && (now - ts) < MD_STALE_THRESHOLD_MS;
+  });
+  if (!fresh) {
+    console.warn('⚠️  WS Primary zombie detectado: 0 Md en 90s con mercado abierto. Forzando reconnect.');
+    try { primaryWs.close(); } catch {}
+  }
+}, 30_000);
+
 // Primary instrument validation + subscription
 app.get('/api/primary/validate', (req, res) => {
   const { ticker, settlement = 'A-24HS' } = req.query;
@@ -2051,20 +2113,25 @@ async function saveIntraFxSample() {
   try {
     if (!isMarketOpen()) return { ok: false, reason: 'market_closed' };
 
-    // Estrategia v3: WebSocket FIRST.
-    // El WS de Primary ya empuja el LA en tiempo real (subscripción a 'LA' en
-    // entries). El REST tiene rate limit muy agresivo en algunos planes
-    // (Veta especialmente), así que arrancamos con el cache del WS y sólo
-    // caemos a REST si falta algún LA. Si REST se rate-limitea, el wrapper
-    // `fetchPrimaryMarketData` aplica un backoff de 1h sin más ruido.
-    const wsLA = (t) => {
-      const v = extractFromMd(latestData[t]?.marketData, 'LA');
-      return Number.isFinite(v) && v > 0 ? v : null;
+    // Estrategia v4: precio = MID(bid, offer) si hay puntas vivas, sino LA.
+    // Antes usaba sólo LA, pero LA no se mueve si no hubo trades nuevos en
+    // la rueda — y AL30/D/C pueden quedar horas sin operar — lo que producía
+    // un gráfico plano de "evolución". El mid de las puntas refleja el
+    // movimiento real-time del mercado aunque no se haya tradeado.
+    const wsPrice = (t) => {
+      const md = latestData[t]?.marketData;
+      const bid   = extractFromMd(md, 'BI');
+      const offer = extractFromMd(md, 'OF');
+      if (Number.isFinite(bid) && Number.isFinite(offer) && bid > 0 && offer > 0) {
+        return (bid + offer) / 2;
+      }
+      const la = extractFromMd(md, 'LA');
+      return Number.isFinite(la) && la > 0 ? la : null;
     };
 
-    let al30_last  = wsLA('AL30');
-    let al30d_last = wsLA('AL30D');
-    let al30c_last = wsLA('AL30C');
+    let al30_last  = wsPrice('AL30');
+    let al30d_last = wsPrice('AL30D');
+    let al30c_last = wsPrice('AL30C');
 
     // Para los que falten en WS, probamos REST (uno por uno; sólo los que
     // realmente hacen falta — minimiza la cantidad de llamadas).
@@ -2078,8 +2145,15 @@ async function saveIntraFxSample() {
       if (!sym) continue;
       const inst = resolved.find(i => symMap[i.symbol] === t);
       const md = await fetchPrimaryMarketData(sym, inst?.marketId || 'ROFX');
-      const v = extractFromMd(md, 'LA');
-      if (Number.isFinite(v) && v > 0) {
+      // Mismo criterio: priorizar mid sobre LA
+      let v = null;
+      const b = extractFromMd(md, 'BI'), o = extractFromMd(md, 'OF');
+      if (Number.isFinite(b) && Number.isFinite(o) && b > 0 && o > 0) v = (b + o) / 2;
+      else {
+        const la = extractFromMd(md, 'LA');
+        if (Number.isFinite(la) && la > 0) v = la;
+      }
+      if (v != null) {
         if (t === 'AL30')  al30_last  = v;
         else if (t === 'AL30D') al30d_last = v;
         else if (t === 'AL30C') al30c_last = v;
@@ -2175,9 +2249,17 @@ app.post('/api/fx/intraday/save', async (req, res) => {
             const fromWs = extractFromMd(latestData[t]?.marketData, entry);
             return Number.isFinite(fromWs) && fromWs > 0 ? fromWs : null;
           };
-          const al30_last  = get(0, 'AL30',  'LA');
-          const al30d_last = get(1, 'AL30D', 'LA');
-          const al30c_last = get(2, 'AL30C', 'LA');
+          // Mismo criterio que saveIntraFxSample: priorizar MID sobre LA
+          // para reflejar movimiento intradiario aunque no haya trades nuevos.
+          const priceOf = (idx, t) => {
+            const bid   = get(idx, t, 'BI');
+            const offer = get(idx, t, 'OF');
+            if (Number.isFinite(bid) && Number.isFinite(offer) && bid > 0 && offer > 0) return (bid + offer) / 2;
+            return get(idx, t, 'LA');
+          };
+          const al30_last  = priceOf(0, 'AL30');
+          const al30d_last = priceOf(1, 'AL30D');
+          const al30c_last = priceOf(2, 'AL30C');
           if (!al30_last || !al30d_last || !al30c_last) return { ok: false, reason: 'no_last_price' };
           const today = todayKeyAR();
           if (lastIntraSaveDate !== today) {
