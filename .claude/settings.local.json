@@ -103,7 +103,9 @@
       "Bash(curl -s --max-time 30 https://dg-dashboard-o3yo.onrender.com/api/health)",
       "Bash(curl -s --max-time 30 \"https://dg-dashboard-o3yo.onrender.com/api/quote/AL30\")",
       "Bash(curl -s http://localhost:3099/api/diag/primary)",
-      "Bash(python -m json.tool)"
+      "Bash(python -m json.tool)",
+      "Bash(curl -s -X POST --max-time 30 https://dg-dashboard-o3yo.onrender.com/api/diag/primary/reconnect)",
+      "Bash(curl -s --max-time 30 https://dg-dashboard-o3yo.onrender.com/api/diag/primary)"
     ]
   }
 }

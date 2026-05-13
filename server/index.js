@@ -1630,6 +1630,23 @@ wss.on('connection', ws => {
   const snap = Object.values(latestData);
   if (snap.length) ws.send(JSON.stringify({ type: 'snapshot', data: snap }));
   ws.send(JSON.stringify({ type: 'status', connected: primaryWs?.readyState === WebSocket.OPEN, tickers: TK }));
+
+  // Si la data está stale (más de 60s sin update durante mercado abierto)
+  // y el WS Primary dice OPEN, asumimos zombie y forzamos reconnect.
+  // Soluciona el caso típico de "después de cold-start de Render": el WS
+  // reconectó pero la subscripción smd se perdió, y nos quedamos sin Md
+  // hasta que alguien entra a la app y dispara este check.
+  if (isMarketOpen() && primaryWs?.readyState === WebSocket.OPEN) {
+    const now = Date.now();
+    const allStale = TK.every(t => {
+      const ts = latestData[t]?.timestamp;
+      return !ts || (now - ts) > 60_000;
+    });
+    if (allStale) {
+      console.warn('⚠️  Browser conectó con data stale (>60s) — forzando reconnect Primary');
+      try { primaryWs.close(); } catch {}
+    }
+  }
 });
 
 const browserHeartbeat = setInterval(() => {
@@ -1688,25 +1705,33 @@ app.post('/api/diag/primary/reconnect', (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Watchdog: si pasamos >90s sin recibir Md durante mercado abierto, asumimos
+// Watchdog: si pasamos >60s sin recibir Md durante mercado abierto, asumimos
 // que el WS está zombi (readyState dice OPEN pero Primary no manda nada) y
 // forzamos reconnect. Pasa típicamente tras un cold-start de Render o si
-// Primary cortó la sesión sin avisar.
-const MD_STALE_THRESHOLD_MS = 90_000;
+// Primary cortó la sesión sin avisar. Chequeo cada 20s.
+const MD_STALE_THRESHOLD_MS = 60_000;
+let lastZombieReconnectAt = 0;
 setInterval(() => {
   if (!isMarketOpen()) return;
   if (!primaryWs || primaryWs.readyState !== WebSocket.OPEN) return;
-  // ¿Tenemos al menos 1 Md en los últimos 90s para alguno de los 3 tickers?
   const now = Date.now();
+  // Cooldown: no disparar reconnect más de 1 vez cada 60s (evita storm si el
+  // reconnect en sí tarda).
+  if (now - lastZombieReconnectAt < 60_000) return;
   const fresh = TK.some(t => {
     const ts = latestData[t]?.timestamp;
     return ts && (now - ts) < MD_STALE_THRESHOLD_MS;
   });
   if (!fresh) {
-    console.warn('⚠️  WS Primary zombie detectado: 0 Md en 90s con mercado abierto. Forzando reconnect.');
+    const ages = TK.map(t => {
+      const ts = latestData[t]?.timestamp;
+      return `${t}:${ts ? Math.round((now - ts) / 1000) + 's' : 'n/a'}`;
+    }).join(' ');
+    console.warn(`⚠️  WS Primary zombie (mercado abierto, sin Md en 60s) — forzando reconnect. Ages: ${ages}`);
+    lastZombieReconnectAt = now;
     try { primaryWs.close(); } catch {}
   }
-}, 30_000);
+}, 20_000);
 
 // Primary instrument validation + subscription
 app.get('/api/primary/validate', (req, res) => {
