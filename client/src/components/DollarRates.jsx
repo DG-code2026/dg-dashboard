@@ -84,8 +84,12 @@ export default function DollarRates({ data, commission, market }) {
     const mV_sin = al30.bid / al30d.offer;     // venta MEP (cliente vende USD)
     const cC_sin = al30.offer / al30c.bid;     // compra CCL (cliente compra USD)
     const cV_sin = al30.bid / al30c.offer;     // venta CCL (cliente vende USD)
-    const jC_sin = (al30d.bid / al30c.offer) - 1;   // canje MEP→CCL "compra"
-    const jV_sin = (al30c.bid / al30d.offer) - 1;   // canje CCL→MEP "venta"
+    // Canje: las flechas en el JSX siguen siendo MEP→CCL bajo COMPRA y CCL→MEP
+    // bajo VENTA. Ahora COMPRA muestra el % de la operación MEP→CCL (descuento
+    // al irte a CCL → negativo) y VENTA el de CCL→MEP (premium al traer a MEP
+    // → positivo), alineado con la perspectiva del operador que ejecuta el canje.
+    const jC_sin = (al30c.bid / al30d.offer) - 1;   // canje MEP→CCL "compra" (operación: vendo AL30 ARS, compro AL30C)
+    const jV_sin = (al30d.bid / al30c.offer) - 1;   // canje CCL→MEP "venta"  (operación: vendo AL30C, compro AL30D)
 
     // Comisión completa en AMBAS patas (compra de un bono + venta del otro).
     return {
@@ -98,8 +102,8 @@ export default function DollarRates({ data, commission, market }) {
         venta:  { sin: cV_sin, con: (al30.bid * (1 - c)) / (al30c.offer * (1 + c)), var: prevCcl ? (cV_sin - prevCcl) / prevCcl : null },
       },
       canje: {
-        compra: { sin: jC_sin, con: ((al30d.bid * (1 - c)) / (al30c.offer * (1 + c))) - 1, var: prevCanjeV != null ? jC_sin - prevCanjeV : null },
-        venta:  { sin: jV_sin, con: ((al30c.bid * (1 - c)) / (al30d.offer * (1 + c))) - 1, var: prevCanjeC != null ? jV_sin - prevCanjeC : null },
+        compra: { sin: jC_sin, con: ((al30c.bid * (1 - c)) / (al30d.offer * (1 + c))) - 1, var: prevCanjeC != null ? jC_sin - prevCanjeC : null },
+        venta:  { sin: jV_sin, con: ((al30d.bid * (1 - c)) / (al30c.offer * (1 + c))) - 1, var: prevCanjeV != null ? jV_sin - prevCanjeV : null },
       },
     };
   }, [data, c]);
