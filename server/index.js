@@ -295,8 +295,13 @@ app.get('/api/db/propuestas', async (req, res) => {
 // esto evita que la UI quede "guardando ok" mientras el INSERT falla en silencio.
 const OPTIONAL_PROPUESTA_COLS = ['override_count_enabled', 'override_count_label', 'override_count_value', 'perfil', 'notes'];
 
-function isPgrstSchemaError(r) {
-  return r && !Array.isArray(r) && (r.code === 'PGRST204' || r.code === '42703');
+// PGRST204 / 42703 = columna inexistente. supa() los eleva como Error con
+// err.body conteniendo el {code, message} de PostgREST, así que chequeamos
+// tanto el throw como la respuesta directa para ser robustos frente a cambios
+// futuros del helper.
+function isPgrstSchemaError(e) {
+  const code = e && (e.code || e.body?.code);
+  return code === 'PGRST204' || code === '42703';
 }
 
 function stripUnknownCol(obj, errMsg) {
@@ -309,31 +314,52 @@ function stripUnknownCol(obj, errMsg) {
   return null;
 }
 
+// Estrategia de retry: supa() lanza en 4xx, así que envolvemos cada intento en
+// try/catch. Si el error es de columna desconocida, la sacamos del payload y
+// reintentamos — hasta agotar las columnas mandadas (cota: una vuelta por
+// columna del body, +1 de seguridad).
 async function supaInsertPropuesta(row) {
   let cur = { ...row };
-  // Hasta 5 reintentos por columnas faltantes (uno por cada OPTIONAL col).
-  for (let i = 0; i < 6; i++) {
-    const r = await supa('/propuestas', { method: 'POST', body: cur });
-    if (Array.isArray(r)) return { ok: true, data: r[0] };
-    if (isPgrstSchemaError(r)) {
-      const s = stripUnknownCol(cur, r.message);
-      if (s) { cur = s.obj; continue; }
+  const maxAttempts = Object.keys(cur).length + 1;
+  for (let i = 0; i < maxAttempts; i++) {
+    try {
+      const r = await supa('/propuestas', { method: 'POST', body: cur });
+      if (Array.isArray(r)) return { ok: true, data: r[0] };
+      return { ok: false, err: r };
+    } catch (e) {
+      if (isPgrstSchemaError(e)) {
+        const s = stripUnknownCol(cur, e.message);
+        if (s) {
+          console.warn(`[propuestas] columna inexistente "${s.stripped}" — descartada del INSERT`);
+          cur = s.obj;
+          continue;
+        }
+      }
+      return { ok: false, err: { message: e.message, code: e.body?.code, body: e.body } };
     }
-    return { ok: false, err: r };
   }
   return { ok: false, err: { message: 'too many schema retries' } };
 }
 
 async function supaPatchPropuesta(id, body) {
   let cur = { ...body };
-  for (let i = 0; i < 6; i++) {
-    const r = await supa(`/propuestas?id=eq.${id}`, { method: 'PATCH', body: cur });
-    if (Array.isArray(r)) return { ok: true, data: r[0] };
-    if (isPgrstSchemaError(r)) {
-      const s = stripUnknownCol(cur, r.message);
-      if (s) { cur = s.obj; continue; }
+  const maxAttempts = Object.keys(cur).length + 1;
+  for (let i = 0; i < maxAttempts; i++) {
+    try {
+      const r = await supa(`/propuestas?id=eq.${id}`, { method: 'PATCH', body: cur });
+      if (Array.isArray(r)) return { ok: true, data: r[0] };
+      return { ok: false, err: r };
+    } catch (e) {
+      if (isPgrstSchemaError(e)) {
+        const s = stripUnknownCol(cur, e.message);
+        if (s) {
+          console.warn(`[propuestas] columna inexistente "${s.stripped}" — descartada del PATCH`);
+          cur = s.obj;
+          continue;
+        }
+      }
+      return { ok: false, err: { message: e.message, code: e.body?.code, body: e.body } };
     }
-    return { ok: false, err: r };
   }
   return { ok: false, err: { message: 'too many schema retries' } };
 }

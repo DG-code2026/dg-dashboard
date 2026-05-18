@@ -70,30 +70,32 @@ export default function DollarRates({ data, commission, market }) {
     const prevCanjeC = al30c.close && al30d.close ? (al30c.close / al30d.close) - 1 : null;
     const prevCanjeV = al30d.close && al30c.close ? (al30d.close / al30c.close) - 1 : null;
 
-    // Convención bancaria (consistente con el dólar oficial):
-    //   COMPRA = precio al que el agente COMPRA dólares al cliente
-    //           (cliente VENDE → recibe ARS) → usa al30.bid / al30d.offer
-    //   VENTA  = precio al que el agente VENDE dólares al cliente
-    //           (cliente COMPRA → paga ARS) → usa al30.offer / al30d.bid
-    // Así compra < venta (siempre), idéntico a oficial y a todos los sitios
-    // financieros AR. Antes estaba invertido (perspectiva del cliente), lo
-    // que confundía vs la línea del oficial mostrada arriba.
-    const mC_sin = al30.bid / al30d.offer;     // compra MEP (sin comisión)
-    const mV_sin = al30.offer / al30d.bid;     // venta MEP (sin comisión)
-    const cC_sin = al30.bid / al30c.offer;     // compra CCL
-    const cV_sin = al30.offer / al30c.bid;     // venta CCL
+    // Convención CLIENTE (la del trader, no la bancaria):
+    //   COMPRA = precio al que el CLIENTE compra USD vía MEP/CCL
+    //           (cliente paga ARS, recibe USD) → usa al30.offer / al30d.bid
+    //           → es el valor MAYOR (porque el cliente paga más).
+    //   VENTA  = precio al que el CLIENTE vende USD vía MEP/CCL
+    //           (cliente entrega USD, recibe ARS) → usa al30.bid / al30d.offer
+    //           → es el valor MENOR (porque recibe menos).
+    // Ojo: esto es lo OPUESTO a la convención bancaria del Oficial publicado
+    // por BNA. El cartel del Oficial de abajo también swapea labels para que
+    // todo el panel sea consistente desde la mirada del operador.
+    const mC_sin = al30.offer / al30d.bid;     // compra MEP (cliente compra USD)
+    const mV_sin = al30.bid / al30d.offer;     // venta MEP (cliente vende USD)
+    const cC_sin = al30.offer / al30c.bid;     // compra CCL (cliente compra USD)
+    const cV_sin = al30.bid / al30c.offer;     // venta CCL (cliente vende USD)
     const jC_sin = (al30d.bid / al30c.offer) - 1;   // canje MEP→CCL "compra"
     const jV_sin = (al30c.bid / al30d.offer) - 1;   // canje CCL→MEP "venta"
 
     // Comisión completa en AMBAS patas (compra de un bono + venta del otro).
     return {
       mep: {
-        compra: { sin: mC_sin, con: (al30.bid * (1 - c)) / (al30d.offer * (1 + c)), var: prevMep ? (mC_sin - prevMep) / prevMep : null },
-        venta:  { sin: mV_sin, con: (al30.offer * (1 + c)) / (al30d.bid * (1 - c)), var: prevMep ? (mV_sin - prevMep) / prevMep : null },
+        compra: { sin: mC_sin, con: (al30.offer * (1 + c)) / (al30d.bid * (1 - c)), var: prevMep ? (mC_sin - prevMep) / prevMep : null },
+        venta:  { sin: mV_sin, con: (al30.bid * (1 - c)) / (al30d.offer * (1 + c)), var: prevMep ? (mV_sin - prevMep) / prevMep : null },
       },
       ccl: {
-        compra: { sin: cC_sin, con: (al30.bid * (1 - c)) / (al30c.offer * (1 + c)), var: prevCcl ? (cC_sin - prevCcl) / prevCcl : null },
-        venta:  { sin: cV_sin, con: (al30.offer * (1 + c)) / (al30c.bid * (1 - c)), var: prevCcl ? (cV_sin - prevCcl) / prevCcl : null },
+        compra: { sin: cC_sin, con: (al30.offer * (1 + c)) / (al30c.bid * (1 - c)), var: prevCcl ? (cC_sin - prevCcl) / prevCcl : null },
+        venta:  { sin: cV_sin, con: (al30.bid * (1 - c)) / (al30c.offer * (1 + c)), var: prevCcl ? (cV_sin - prevCcl) / prevCcl : null },
       },
       canje: {
         compra: { sin: jC_sin, con: ((al30d.bid * (1 - c)) / (al30c.offer * (1 + c))) - 1, var: prevCanjeV != null ? jC_sin - prevCanjeV : null },
@@ -300,15 +302,19 @@ function OficialCard({ oficial, error, delay }) {
         <span style={S.cardSub}>{sub}</span>
         {stale && <span style={S.staleBadge}>cache vencido</span>}
       </div>
+      {/* Labels swapeados a perspectiva CLIENTE para alinear con MEP/CCL:
+          - "COMPRA" muestra el valor que el cliente paga al comprar USD = BNA's venta (mayor).
+          - "VENTA" muestra el valor que el cliente recibe al vender USD = BNA's compra (menor).
+          Los datos de Bluelytics/DolarAPI llegan con la convención bancaria original. */}
       <div style={S.sidesRow}>
         <div style={S.sideCol}>
           <span style={{ ...S.sideLabel, color: 'var(--neon)' }}>COMPRA</span>
-          <span style={{ ...S.mainPrice, color: 'var(--neon)' }}>${fmtPrice(compra)}</span>
+          <span style={{ ...S.mainPrice, color: 'var(--neon)' }}>${fmtPrice(venta)}</span>
         </div>
         <div style={S.sideDivider} />
         <div style={S.sideCol}>
           <span style={{ ...S.sideLabel, color: 'var(--red)' }}>VENTA</span>
-          <span style={{ ...S.mainPrice, color: 'var(--red)' }}>${fmtPrice(venta)}</span>
+          <span style={{ ...S.mainPrice, color: 'var(--red)' }}>${fmtPrice(compra)}</span>
         </div>
       </div>
       <div style={S.oficialFooter}>

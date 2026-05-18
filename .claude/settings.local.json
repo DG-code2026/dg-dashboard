@@ -105,7 +105,21 @@
       "Bash(curl -s http://localhost:3099/api/diag/primary)",
       "Bash(python -m json.tool)",
       "Bash(curl -s -X POST --max-time 30 https://dg-dashboard-o3yo.onrender.com/api/diag/primary/reconnect)",
-      "Bash(curl -s --max-time 30 https://dg-dashboard-o3yo.onrender.com/api/diag/primary)"
+      "Bash(curl -s --max-time 30 https://dg-dashboard-o3yo.onrender.com/api/diag/primary)",
+      "Bash(cd \"C:\\\\Users\\\\Florencia\\\\AppData\\\\Roaming\\\\Claude\\\\local-agent-mode-sessions\\\\skills-plugin\\\\a1175338-5e4a-496f-ae24-734fd7272ce5\\\\d21c3eb3-46ee-4b57-a126-a7e813f8e759\\\\skills\\\\xlsx\" && ls scripts)",
+      "Bash(python -c \"import pandas as pd; xl = pd.ExcelFile\\(r'C:\\\\Users\\\\Florencia\\\\Downloads\\\\cartera_flujo_fondos.xlsx'\\); print\\('Sheets:', xl.sheet_names\\); [print\\('---', s, '---\\\\n', pd.read_excel\\(xl, sheet_name=s\\).to_string\\(\\)\\) for s in xl.sheet_names]\")",
+      "Bash(python build_flujo_cartera.py)",
+      "Bash(where soffice *)",
+      "Bash(dir /b \"C:\\\\Program Files\\\\LibreOffice\\\\program\\\\soffice.exe\")",
+      "Bash(dir /b \"C:\\\\Program Files \\(x86\\)\\\\LibreOffice\\\\program\\\\soffice.exe\")",
+      "Bash(rm \"C:\\\\Users\\\\Florencia\\\\Downloads\\\\D&G - Flujo de Fondos - Cartera USD.xlsx\")",
+      "Bash(rm build_flujo_cartera.py)",
+      "Bash(python -c \"import reportlab; print\\(reportlab.__version__\\)\")",
+      "Bash(python -c \"import weasyprint; print\\('weasy ok'\\)\")",
+      "PowerShell(pip install reportlab --quiet 2>&1)",
+      "PowerShell($found = @\\(\\); foreach \\($p in @\\(\"C:\\\\Program Files \\(x86\\)\\\\Microsoft\\\\Edge\\\\Application\\\\msedge.exe\",\"C:\\\\Program Files\\\\Microsoft\\\\Edge\\\\Application\\\\msedge.exe\",\"C:\\\\Program Files\\\\Google\\\\Chrome\\\\Application\\\\chrome.exe\",\"C:\\\\Program Files \\(x86\\)\\\\Google\\\\Chrome\\\\Application\\\\chrome.exe\",\"$env:LOCALAPPDATA\\\\Google\\\\Chrome\\\\Application\\\\chrome.exe\",\"$env:LOCALAPPDATA\\\\Microsoft\\\\Edge\\\\Application\\\\msedge.exe\"\\)\\) { if \\(Test-Path $p\\) { $found += $p } }; $found)",
+      "Bash(curl -s -m 5 http://localhost:3001/api/ppi/status)",
+      "PowerShell(Test-Path \"C:\\\\Users\\\\Florencia\\\\Desktop\\\\primary-dashboard \\(3\\)\\\\primary-dashboard\\\\.env\"; if \\(Test-Path \"C:\\\\Users\\\\Florencia\\\\Desktop\\\\primary-dashboard \\(3\\)\\\\primary-dashboard\\\\.env\"\\) { Get-Content \"C:\\\\Users\\\\Florencia\\\\Desktop\\\\primary-dashboard \\(3\\)\\\\primary-dashboard\\\\.env\" | Select-String -Pattern \"PPI_\" | ForEach-Object { \\($_.Line -split '='\\)[0] + '=...' } })"
     ]
   }
 }

@@ -678,6 +678,7 @@ function AperturaRow({ cfg, url, copied, onCopy }) {
 const INFO_LINKS = [
   { title: 'CURVAS TASA PESOS · FIJA, CER', url: 'https://breakeven.ar/curvas' },
   { title: 'BOND TERMINAL',                 url: 'https://bondterminal.com/' },
+  { title: 'LICITACIONES',                  url: 'https://marketdata.mae.com.ar/licitaciones', color: '#3B82F6' },
   { title: "FCI's",                         url: 'https://fonditos.ar/',     color: '#EF4444' },
   { title: 'ETFs',                          url: 'https://www.etf.com/tools', color: '#0EA5E9' },
 ];
