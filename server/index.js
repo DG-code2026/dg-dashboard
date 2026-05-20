@@ -619,46 +619,6 @@ app.post('/api/auth/refresh-whitelist', requireAdmin, async (_req, res) => {
   res.json({ ok: true, count: whitelistCache.items.size });
 });
 
-// POST /api/auth/check-password — primer paso del 2FA.
-// Verifica email+password contra Supabase sin crear sesión en el cliente.
-// Si la contraseña es válida → el cliente llama signInWithOtp para el código.
-// Rate-limit: 5 intentos / 15 min por IP.
-const pwCheckAttempts = new Map(); // ip → { count, resetAt }
-const PW_CHECK_MAX = 5;
-const PW_CHECK_WINDOW_MS = 15 * 60 * 1000;
-
-app.post('/api/auth/check-password', async (req, res) => {
-  const ip = (req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').split(',')[0].trim();
-  const now = Date.now();
-  const entry = pwCheckAttempts.get(ip) || { count: 0, resetAt: now + PW_CHECK_WINDOW_MS };
-  if (now >= entry.resetAt) { entry.count = 0; entry.resetAt = now + PW_CHECK_WINDOW_MS; }
-  if (entry.count >= PW_CHECK_MAX) {
-    return res.status(429).json({ error: 'Demasiados intentos. Esperá 15 minutos.' });
-  }
-
-  const { email, password } = req.body || {};
-  if (!email || !password) return res.status(400).json({ error: 'Faltan campos' });
-
-  try {
-    // Verificamos via función PostgreSQL (SECURITY DEFINER) — no depende de GoTrue
-    // ni de variables extra en Render. Funciona con anon key.
-    const ok = await supa('/rpc/verify_user_password', {
-      method: 'POST',
-      body: { p_email: email.trim().toLowerCase(), p_password: password },
-      prefer: '',
-    });
-    if (!ok) {
-      entry.count++;
-      pwCheckAttempts.set(ip, entry);
-      return res.status(401).json({ error: 'Email o contraseña incorrectos' });
-    }
-    pwCheckAttempts.delete(ip);
-    res.json({ ok: true });
-  } catch (e) {
-    console.error('[auth] check-password error:', e.message);
-    res.status(500).json({ error: 'Error de servidor' });
-  }
-});
 
 // ══════════════════════════════════════════════
 //  CLIENTES (DB de clientes con login gate)
