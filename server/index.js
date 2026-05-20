@@ -27,6 +27,15 @@ const PRIMARY_PASS = process.env.PRIMARY_PASS;
 // ══════════════════════════════════════════════
 const SUPA_URL = process.env.SUPABASE_URL;
 const SUPA_KEY = process.env.SUPABASE_KEY;
+// SERVICE_KEY (opcional pero recomendada): bypassa RLS. Sin ella, el server
+// usa el anon key — funciona si las tablas no tienen RLS, pero ahora que
+// hay RLS habilitado todas las queries fallarían. Si no está, fallback a
+// anon con un log de warning para que se note.
+const SUPA_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || '';
+const SUPA_EFFECTIVE_KEY = SUPA_SERVICE_KEY || SUPA_KEY;
+if (!SUPA_SERVICE_KEY) {
+  console.warn('⚠️  SUPABASE_SERVICE_KEY no seteada — usando anon key. Con RLS habilitado, los inserts/updates fallarán. Setear SUPABASE_SERVICE_KEY en .env de Render.');
+}
 
 async function supa(path, opts = {}) {
   // Timeout duro de 8s para que Supabase no cuelgue requests del cliente.
@@ -34,8 +43,8 @@ async function supa(path, opts = {}) {
   const { status, data } = await httpJson(`${SUPA_URL}/rest/v1${path}`, {
     method: opts.method || 'GET',
     headers: {
-      'apikey': SUPA_KEY,
-      'Authorization': `Bearer ${SUPA_KEY}`,
+      'apikey': SUPA_EFFECTIVE_KEY,
+      'Authorization': `Bearer ${SUPA_EFFECTIVE_KEY}`,
       'Prefer': opts.prefer || 'return=representation',
     },
     body: opts.body,
@@ -454,6 +463,201 @@ app.delete('/api/db/fondos-pershing/:isin', async (req, res) => {
     await supa(`/fondos_pershing?isin=eq.${encodeURIComponent(isin)}`, { method: 'DELETE' });
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ══════════════════════════════════════════════
+//  AUTH — Supabase Auth multi-usuario con whitelist (allowed_users)
+//
+//  - El cliente se autentica contra Supabase Auth (email/pass o Google).
+//    Recibe un JWT que mete en `Authorization: Bearer <jwt>` en cada request.
+//  - Este middleware valida el JWT contra Supabase (vía /auth/v1/user) y
+//    verifica que el email esté en `allowed_users` con `active=true`. Si no
+//    pasa una de las dos cosas → 401/403.
+//  - Endpoint `GET /api/auth/me` devuelve el perfil (email, role, active)
+//    al cliente para decidir si mostrar la app o "pendiente de aprobación".
+//  - Cada sign-in y sign-out se loguea en `auth_log` para auditoría.
+//
+//  Decisión de diseño: validamos el JWT contra Supabase REST en cada request
+//  (con cache breve), en vez de verificar la firma con la JWT secret. Razón:
+//  rotamos sin tocar el server, y nos asegura que un usuario "desactivado en
+//  Supabase" no pueda seguir usando un token viejo.
+// ══════════════════════════════════════════════
+const SUPA_AUTH_URL = SUPA_URL ? `${SUPA_URL}/auth/v1` : '';
+
+// Cache de validación de JWT → user payload. TTL corto para no martillar a
+// Supabase si el mismo cliente hace muchas requests seguidas.
+const jwtCache = new Map();   // token → { user, expiresAt }
+const JWT_CACHE_TTL_MS = 60_000;
+
+async function verifySupabaseJwt(token) {
+  if (!token || !SUPA_AUTH_URL) return null;
+  const cached = jwtCache.get(token);
+  if (cached && cached.expiresAt > Date.now()) return cached.user;
+  try {
+    const { status, data } = await httpJson(`${SUPA_AUTH_URL}/user`, {
+      method: 'GET',
+      headers: { apikey: SUPA_KEY, Authorization: `Bearer ${token}` },
+      timeoutMs: 5000,
+      retries: 0,
+    });
+    if (status !== 200 || !data?.email) return null;
+    const user = { id: data.id, email: data.email.toLowerCase(), raw: data };
+    jwtCache.set(token, { user, expiresAt: Date.now() + JWT_CACHE_TTL_MS });
+    return user;
+  } catch {
+    return null;
+  }
+}
+
+// Cache del whitelist: refresca cada 30s. Si querés que un alta/baja sea
+// inmediata, llamá a /api/auth/refresh-whitelist (admin only).
+let whitelistCache = { items: new Map(), fetchedAt: 0 };
+const WL_CACHE_TTL_MS = 30_000;
+
+async function getWhitelist() {
+  const now = Date.now();
+  if (now - whitelistCache.fetchedAt < WL_CACHE_TTL_MS && whitelistCache.items.size > 0) {
+    return whitelistCache.items;
+  }
+  try {
+    const rows = await supa('/allowed_users?select=email,full_name,role,active');
+    const map = new Map();
+    if (Array.isArray(rows)) {
+      for (const r of rows) map.set(String(r.email).toLowerCase(), r);
+    }
+    whitelistCache = { items: map, fetchedAt: now };
+    return map;
+  } catch (e) {
+    console.warn('[auth] getWhitelist fail:', e.message);
+    return whitelistCache.items;  // fallback al cache aunque sea viejo
+  }
+}
+
+function extractBearer(req) {
+  const auth = req.headers.authorization || '';
+  const m = /^Bearer\s+(.+)$/i.exec(auth);
+  return m ? m[1] : null;
+}
+
+// Middleware: requiere JWT válido + email en whitelist. Adjunta `req.auth`.
+async function requireAuth(req, res, next) {
+  const token = extractBearer(req);
+  if (!token) return res.status(401).json({ error: 'unauthorized' });
+  const user = await verifySupabaseJwt(token);
+  if (!user) return res.status(401).json({ error: 'invalid token' });
+  const wl = await getWhitelist();
+  const entry = wl.get(user.email);
+  if (!entry || !entry.active) {
+    return res.status(403).json({ error: 'not whitelisted', email: user.email });
+  }
+  req.auth = { user, profile: entry };
+  next();
+}
+
+// Variant para endpoints admin-only.
+async function requireAdmin(req, res, next) {
+  await requireAuth(req, res, () => {
+    if (req.auth?.profile?.role !== 'admin') {
+      return res.status(403).json({ error: 'admin only' });
+    }
+    next();
+  });
+}
+
+async function logAuthEvent(event, user, req, meta = null) {
+  try {
+    await supa('/auth_log', {
+      method: 'POST',
+      body: {
+        user_id: user?.id || null,
+        email: user?.email || null,
+        event,
+        ip: (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').toString().split(',')[0].trim() || null,
+        user_agent: (req.headers['user-agent'] || '').toString().slice(0, 500),
+        meta,
+      },
+    });
+  } catch (e) { /* log audit no debería tirar el request */ }
+}
+
+// GET /api/auth/me — valida JWT + whitelist y devuelve perfil. El cliente lo
+// usa al arrancar (y tras cada cambio de sesión) para decidir el flow.
+app.get('/api/auth/me', async (req, res) => {
+  const token = extractBearer(req);
+  if (!token) return res.status(401).json({ error: 'no token' });
+  const user = await verifySupabaseJwt(token);
+  if (!user) return res.status(401).json({ error: 'invalid token' });
+  const wl = await getWhitelist();
+  const entry = wl.get(user.email);
+  if (!entry || !entry.active) {
+    await logAuthEvent('sign_in_blocked', user, req, { reason: !entry ? 'not_whitelisted' : 'inactive' });
+    return res.status(403).json({ error: 'not whitelisted', email: user.email });
+  }
+  // Log sign_in la primera vez por sesión (cache de JWT → ya está en jwtCache,
+  // si el cache estaba frío significa que es un login nuevo).
+  await logAuthEvent('sign_in', user, req);
+  res.json({
+    email: user.email,
+    full_name: entry.full_name || null,
+    role: entry.role || 'user',
+    active: !!entry.active,
+  });
+});
+
+app.post('/api/auth/sign-out', async (req, res) => {
+  const token = extractBearer(req);
+  const user = token ? await verifySupabaseJwt(token) : null;
+  if (user) await logAuthEvent('sign_out', user, req);
+  jwtCache.delete(token);
+  res.json({ ok: true });
+});
+
+// Forzar refresh del whitelist (útil cuando un admin agrega/quita gente).
+app.post('/api/auth/refresh-whitelist', requireAdmin, async (_req, res) => {
+  whitelistCache = { items: new Map(), fetchedAt: 0 };
+  await getWhitelist();
+  res.json({ ok: true, count: whitelistCache.items.size });
+});
+
+// POST /api/auth/check-password — primer paso del 2FA.
+// Verifica email+password contra Supabase sin crear sesión en el cliente.
+// Si la contraseña es válida → el cliente llama signInWithOtp para el código.
+// Rate-limit: 5 intentos / 15 min por IP.
+const pwCheckAttempts = new Map(); // ip → { count, resetAt }
+const PW_CHECK_MAX = 5;
+const PW_CHECK_WINDOW_MS = 15 * 60 * 1000;
+
+app.post('/api/auth/check-password', async (req, res) => {
+  const ip = (req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').split(',')[0].trim();
+  const now = Date.now();
+  const entry = pwCheckAttempts.get(ip) || { count: 0, resetAt: now + PW_CHECK_WINDOW_MS };
+  if (now >= entry.resetAt) { entry.count = 0; entry.resetAt = now + PW_CHECK_WINDOW_MS; }
+  if (entry.count >= PW_CHECK_MAX) {
+    return res.status(429).json({ error: 'Demasiados intentos. Esperá 15 minutos.' });
+  }
+
+  const { email, password } = req.body || {};
+  if (!email || !password) return res.status(400).json({ error: 'Faltan campos' });
+
+  try {
+    // Llamamos directamente a Supabase GoTrue — no persiste sesión en ningún cliente
+    const r = await fetch(`${SUPA_URL}/auth/v1/token?grant_type=password`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'apikey': SUPA_KEY },
+      body: JSON.stringify({ email: email.trim().toLowerCase(), password }),
+    });
+    if (!r.ok) {
+      entry.count++;
+      pwCheckAttempts.set(ip, entry);
+      return res.status(401).json({ error: 'Email o contraseña incorrectos' });
+    }
+    // Contraseña correcta — resetear contador
+    pwCheckAttempts.delete(ip);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[auth] check-password error:', e.message);
+    res.status(500).json({ error: 'Error de servidor' });
+  }
 });
 
 // ══════════════════════════════════════════════

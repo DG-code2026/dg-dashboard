@@ -30,7 +30,15 @@ function typeLabel(id) { return ASSET_TYPES.find(t => t.id === id)?.label || id;
 function assetDisplayType(it) {
   if (it.is_manual) {
     const base = it.manual_type_label || 'Manual';
-    const rc = it.manual_risk_class === 'variable' ? 'RV' : 'RF';
+    // Clase de renta: 'fija' | 'variable' | 'mixto'. Para mixto mostramos el split (60/40).
+    let rc;
+    if (it.manual_risk_class === 'mixto') {
+      const f = Math.round(Number(it.manual_mix_fija_pct) || 0);
+      const v = Math.round(Number(it.manual_mix_variable_pct) || (100 - f));
+      rc = `${f}/${v} RF/RV`;
+    } else {
+      rc = it.manual_risk_class === 'variable' ? 'RV' : 'RF';
+    }
     const desc = it.snapshot_description;
     return desc ? `${base} · ${desc} · ${rc}` : `${base} · ${rc}`;
   }
@@ -170,7 +178,10 @@ function PropuestaEditor({ initial, onCancel, onSaved }) {
       // Campos para carga manual (fuera de PPI): el usuario declara tipo, nombre y clase RF/RV.
       is_manual: !!asset.is_manual,
       manual_type_label: asset.manual_type_label || null,
-      manual_risk_class: asset.manual_risk_class || null, // 'fija' | 'variable' | null
+      // 'fija' | 'variable' | 'mixto' | null. Para 'mixto' se guardan también los dos %.
+      manual_risk_class: asset.manual_risk_class || null,
+      manual_mix_fija_pct:     asset.manual_mix_fija_pct     ?? null,
+      manual_mix_variable_pct: asset.manual_mix_variable_pct ?? null,
     }]);
   };
 
@@ -471,12 +482,16 @@ function AssetPicker({ onAdd }) {
   // Campos manuales para FCI (PPI no expone fundType / mínimo / composición vía API pública).
   const [fciManual, setFciManual] = useState({ fundType: '', minInvestment: '', composition: '' });
   // Entrada totalmente manual (fondos / activos no cubiertos por PPI).
+  // risk_class: 'fija' | 'variable' | 'mixto'. Para mixto, los dos pcts deben
+  // sumar 100 (validado al agregar). Default: 60/40 (perfil típico balanceado).
   const [manualForm, setManualForm] = useState({
     ticker: '',
     type_label: '',
     description: '',
     currency: 'ARS',
-    risk_class: 'fija', // 'fija' | 'variable'
+    risk_class: 'fija',
+    mix_fija_pct: 60,
+    mix_variable_pct: 40,
   });
 
   const search = async () => {
@@ -517,24 +532,52 @@ function AssetPicker({ onAdd }) {
     setFciManual({ fundType: '', minInvestment: '', composition: '' });
   };
 
-  const mup = (k, v) => setManualForm(p => ({ ...p, [k]: v }));
+  const mup = (k, v) => {
+    // Si tocan uno de los dos % del mix, mantenemos el complemento al 100%
+    // automáticamente para que sumen exacto. El usuario puede sobreescribir
+    // el otro después si quiere ajustes finos.
+    if (k === 'mix_fija_pct') {
+      const f = Math.max(0, Math.min(100, Number(v) || 0));
+      setManualForm(p => ({ ...p, mix_fija_pct: f, mix_variable_pct: +(100 - f).toFixed(2) }));
+      return;
+    }
+    if (k === 'mix_variable_pct') {
+      const vv = Math.max(0, Math.min(100, Number(v) || 0));
+      setManualForm(p => ({ ...p, mix_variable_pct: vv, mix_fija_pct: +(100 - vv).toFixed(2) }));
+      return;
+    }
+    setManualForm(p => ({ ...p, [k]: v }));
+  };
   const addManual = () => {
     const t = manualForm.ticker.trim().toUpperCase();
     const lbl = manualForm.type_label.trim();
     if (!t) { alert('Ingresá un ticker o código corto para el activo.'); return; }
     if (!lbl) { alert('Ingresá el tipo de activo (ej: Plazo Fijo, Caución, Fondo Común).'); return; }
+    const isMix = manualForm.risk_class === 'mixto';
+    let mix_fija = null, mix_variable = null;
+    if (isMix) {
+      mix_fija = Number(manualForm.mix_fija_pct) || 0;
+      mix_variable = Number(manualForm.mix_variable_pct) || 0;
+      const sum = mix_fija + mix_variable;
+      if (Math.abs(sum - 100) > 0.5) {
+        alert(`Los porcentajes de RF y RV deben sumar 100% (actual: ${sum.toFixed(1)}%).`);
+        return;
+      }
+    }
     onAdd({
       ticker: t,
       type: 'MANUAL',
       is_manual: true,
       manual_type_label: lbl,
       manual_risk_class: manualForm.risk_class,
+      manual_mix_fija_pct:     isMix ? mix_fija     : null,
+      manual_mix_variable_pct: isMix ? mix_variable : null,
       description: manualForm.description.trim() || null,
       currency: manualForm.currency || null,
       settlement: null,
       snapshot_at: new Date().toISOString(),
     });
-    setManualForm({ ticker: '', type_label: '', description: '', currency: 'ARS', risk_class: 'fija' });
+    setManualForm({ ticker: '', type_label: '', description: '', currency: 'ARS', risk_class: 'fija', mix_fija_pct: 60, mix_variable_pct: 40 });
   };
 
   const isFci = type === 'FCI';
@@ -641,12 +684,35 @@ function ManualEntryForm({ form, up, onAdd }) {
           </select>
         </F>
         <F l="Clase de renta" req>
-          <div style={{ display: 'flex', gap: 6 }}>
-            <button type="button" onClick={() => up('risk_class', 'fija')} style={{ ...S.toggleBtn, ...(form.risk_class === 'fija' ? S.toggleActive : {}) }}>RENTA FIJA</button>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+            <button type="button" onClick={() => up('risk_class', 'fija')}     style={{ ...S.toggleBtn, ...(form.risk_class === 'fija'     ? S.toggleActive : {}) }}>RENTA FIJA</button>
             <button type="button" onClick={() => up('risk_class', 'variable')} style={{ ...S.toggleBtn, ...(form.risk_class === 'variable' ? S.toggleActive : {}) }}>RENTA VARIABLE</button>
+            <button type="button" onClick={() => up('risk_class', 'mixto')}    style={{ ...S.toggleBtn, ...(form.risk_class === 'mixto'    ? S.toggleActive : {}) }}>BALANCEADO</button>
           </div>
         </F>
       </div>
+
+      {/* Inputs de mix RF/RV — sólo cuando risk_class = mixto. Al cambiar uno,
+          el otro se ajusta automáticamente a 100 - X (validado al agregar). */}
+      {form.risk_class === 'mixto' && (
+        <div style={{ marginTop: 10, padding: 10, borderRadius: 4, background: 'var(--row-alt)', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 10 }}>
+          <F l="% Renta Fija" req>
+            <input type="number" min="0" max="100" step="1" style={S.input}
+              value={form.mix_fija_pct}
+              onChange={e => up('mix_fija_pct', e.target.value)} />
+          </F>
+          <F l="% Renta Variable" req>
+            <input type="number" min="0" max="100" step="1" style={S.input}
+              value={form.mix_variable_pct}
+              onChange={e => up('mix_variable_pct', e.target.value)} />
+          </F>
+          <div style={{ alignSelf: 'end', fontSize: 10, fontFamily: "'Roboto Mono',monospace", color: 'var(--text-dim)' }}>
+            Total: <b style={{ color: 'var(--text)' }}>{(Number(form.mix_fija_pct) + Number(form.mix_variable_pct)).toFixed(0)}%</b>
+            <span style={{ marginLeft: 8, fontSize: 9 }}>(deben sumar 100%)</span>
+          </div>
+        </div>
+      )}
+
       <div style={{ marginTop: 10, display: 'flex', justifyContent: 'flex-end' }}>
         <button style={{ ...S.btnPrimary, padding: '6px 14px', fontSize: 10 }} onClick={onAdd}>＋ AGREGAR A PROPUESTA</button>
       </div>
@@ -712,11 +778,19 @@ function computeAggregates(items) {
     typeMap.set(typeKey, (typeMap.get(typeKey) || 0) + w);
     const cur = it.snapshot_currency || 'ARS';
     currMap.set(cur, (currMap.get(cur) || 0) + w);
-    // Clasificación RF/RV: manual manda sobre bondLike.
-    const isFija = it.is_manual
-      ? (it.manual_risk_class === 'fija')
-      : !!ASSET_TYPES.find(t => t.id === it.type)?.bondLike;
-    if (isFija) fijaPct += w;
+    // Clasificación RF/RV:
+    //   - manual + risk_class=mixto: prorratea según manual_mix_fija_pct
+    //   - manual + risk_class=fija/variable: 100% al lado correspondiente
+    //   - PPI: por flag bondLike del ASSET_TYPE
+    if (it.is_manual && it.manual_risk_class === 'mixto') {
+      const mixF = Math.max(0, Math.min(100, Number(it.manual_mix_fija_pct) || 0));
+      fijaPct += w * (mixF / 100);
+    } else {
+      const isFija = it.is_manual
+        ? (it.manual_risk_class === 'fija')
+        : !!ASSET_TYPES.find(t => t.id === it.type)?.bondLike;
+      if (isFija) fijaPct += w;
+    }
   }
   const base = totalPct > 0 ? totalPct : 100;
   const pctFija = (fijaPct / base) * 100;

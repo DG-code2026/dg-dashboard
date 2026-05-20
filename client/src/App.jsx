@@ -9,6 +9,8 @@ import TickerCard from './components/TickerCard';
 import DollarRates from './components/DollarRates';
 import RatioIntradayCharts from './components/RatioIntradayCharts';
 import OutOfOfficeModal from './components/OutOfOfficeModal';
+import { AuthProvider, useAuth } from './auth/AuthContext';
+import AuthGate from './auth/AuthGate';
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  ROUTING + LAZY LOADING
@@ -54,26 +56,30 @@ const TABS = [
 
 export default function App() {
   return (
-    <BrowserRouter>
-      <Routes>
-        <Route element={<Layout />}>
-          <Route index               element={<HomeRoute />} />
-          <Route path="fx"           element={<FxRoute />} />
-          <Route path="renta-fija"   element={<RfRoute />} />
-          <Route path="soberanos"    element={<SobRoute />} />
-          <Route path="subsoberanos" element={<SubRoute />} />
-          <Route path="rotaciones"   element={<RotRoute />} />
-          <Route path="trades"       element={<TradesRoute />} />
-          <Route path="carteras"     element={<CartRoute />} />
-          <Route path="propuestas"   element={<PropRoute />} />
-          <Route path="cartas"       element={<CartasRoute />} />
-          <Route path="pershing"     element={<PershingRoute />} />
-          <Route path="avisos-saldo" element={<AvisosRoute />} />
-          <Route path="clientes"     element={<ClientesRoute />} />
-          <Route path="*"            element={<NotFoundRoute />} />
-        </Route>
-      </Routes>
-    </BrowserRouter>
+    <AuthProvider>
+      <AuthGate>
+        <BrowserRouter>
+          <Routes>
+            <Route element={<Layout />}>
+              <Route index               element={<HomeRoute />} />
+              <Route path="fx"           element={<FxRoute />} />
+              <Route path="renta-fija"   element={<RfRoute />} />
+              <Route path="soberanos"    element={<SobRoute />} />
+              <Route path="subsoberanos" element={<SubRoute />} />
+              <Route path="rotaciones"   element={<RotRoute />} />
+              <Route path="trades"       element={<TradesRoute />} />
+              <Route path="carteras"     element={<CartRoute />} />
+              <Route path="propuestas"   element={<PropRoute />} />
+              <Route path="cartas"       element={<CartasRoute />} />
+              <Route path="pershing"     element={<PershingRoute />} />
+              <Route path="avisos-saldo" element={<AvisosRoute />} />
+              <Route path="clientes"     element={<ClientesRoute />} />
+              <Route path="*"            element={<NotFoundRoute />} />
+            </Route>
+          </Routes>
+        </BrowserRouter>
+      </AuthGate>
+    </AuthProvider>
   );
 }
 
@@ -190,6 +196,7 @@ function Layout() {
             <span className="ooo-btn-label" style={st.oooBtnLabel}>FUERA DE OFICINA</span>
           </button>
           <button onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')} style={st.themeBtn}>{theme === 'dark' ? '☀' : '☾'}</button>
+          <UserMenu />
           <StatusBar connected={connected} primaryConnected={primaryConnected} />
         </div>
       </header>
@@ -331,6 +338,43 @@ function AvisosRoute() {
 }
 function ClientesRoute() {
   return <section><SH title="CLIENTES" /><ClientesPage /></section>;
+}
+
+// Mini-menu con email del user logueado + botón cerrar sesión.
+function UserMenu() {
+  const { profile, session, signOut } = useAuth();
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [open]);
+  const email = profile?.email || session?.user?.email || '';
+  const initial = (email[0] || '?').toUpperCase();
+  return (
+    <div ref={ref} style={{ position: 'relative' }}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        title={email}
+        style={{ background: 'transparent', border: '1px solid var(--border)', borderRadius: '50%', width: 30, height: 30, color: 'var(--neon)', cursor: 'pointer', fontWeight: 700, fontSize: 12, fontFamily: 'inherit' }}
+      >{initial}</button>
+      {open && (
+        <div style={{ position: 'absolute', top: 'calc(100% + 6px)', right: 0, background: 'var(--bg-card)', border: '1px solid var(--border-neon)', borderRadius: 6, padding: 8, minWidth: 200, zIndex: 200, boxShadow: '0 12px 32px rgba(0,0,0,0.45)' }}>
+          <div style={{ padding: '6px 10px', fontSize: 10, color: 'var(--text-dim)', fontFamily: "'Roboto Mono',monospace", letterSpacing: 1 }}>SESIÓN</div>
+          <div style={{ padding: '0 10px 8px', fontSize: 11, color: 'var(--text)' }}>{email}</div>
+          {profile?.role === 'admin' && (
+            <div style={{ padding: '0 10px 8px', fontSize: 9, fontFamily: "'Roboto Mono',monospace", letterSpacing: 1.5, color: 'var(--neon)' }}>ADMIN</div>
+          )}
+          <button
+            onClick={() => { setOpen(false); signOut(); }}
+            style={{ display: 'block', width: '100%', padding: '8px 10px', textAlign: 'left', background: 'transparent', border: 'none', color: 'var(--text)', cursor: 'pointer', fontSize: 11, fontFamily: 'inherit', borderTop: '1px solid var(--border)', marginTop: 4 }}
+          >Cerrar sesión</button>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function NotFoundRoute() {

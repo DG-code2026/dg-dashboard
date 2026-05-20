@@ -119,7 +119,8 @@
       "PowerShell(pip install reportlab --quiet 2>&1)",
       "PowerShell($found = @\\(\\); foreach \\($p in @\\(\"C:\\\\Program Files \\(x86\\)\\\\Microsoft\\\\Edge\\\\Application\\\\msedge.exe\",\"C:\\\\Program Files\\\\Microsoft\\\\Edge\\\\Application\\\\msedge.exe\",\"C:\\\\Program Files\\\\Google\\\\Chrome\\\\Application\\\\chrome.exe\",\"C:\\\\Program Files \\(x86\\)\\\\Google\\\\Chrome\\\\Application\\\\chrome.exe\",\"$env:LOCALAPPDATA\\\\Google\\\\Chrome\\\\Application\\\\chrome.exe\",\"$env:LOCALAPPDATA\\\\Microsoft\\\\Edge\\\\Application\\\\msedge.exe\"\\)\\) { if \\(Test-Path $p\\) { $found += $p } }; $found)",
       "Bash(curl -s -m 5 http://localhost:3001/api/ppi/status)",
-      "PowerShell(Test-Path \"C:\\\\Users\\\\Florencia\\\\Desktop\\\\primary-dashboard \\(3\\)\\\\primary-dashboard\\\\.env\"; if \\(Test-Path \"C:\\\\Users\\\\Florencia\\\\Desktop\\\\primary-dashboard \\(3\\)\\\\primary-dashboard\\\\.env\"\\) { Get-Content \"C:\\\\Users\\\\Florencia\\\\Desktop\\\\primary-dashboard \\(3\\)\\\\primary-dashboard\\\\.env\" | Select-String -Pattern \"PPI_\" | ForEach-Object { \\($_.Line -split '='\\)[0] + '=...' } })"
+      "PowerShell(Test-Path \"C:\\\\Users\\\\Florencia\\\\Desktop\\\\primary-dashboard \\(3\\)\\\\primary-dashboard\\\\.env\"; if \\(Test-Path \"C:\\\\Users\\\\Florencia\\\\Desktop\\\\primary-dashboard \\(3\\)\\\\primary-dashboard\\\\.env\"\\) { Get-Content \"C:\\\\Users\\\\Florencia\\\\Desktop\\\\primary-dashboard \\(3\\)\\\\primary-dashboard\\\\.env\" | Select-String -Pattern \"PPI_\" | ForEach-Object { \\($_.Line -split '='\\)[0] + '=...' } })",
+      "mcp__8b3b992f-c57e-4ed6-b0c3-c4f47ba87249__list_tables"
     ]
   }
 }
