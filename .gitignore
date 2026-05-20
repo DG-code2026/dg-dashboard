@@ -1,6 +1,8 @@
 # Dependencies
 node_modules/
 client/node_modules/
+.claude/
+package-lock.json
 
 # Environment
 .env
