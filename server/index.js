@@ -640,18 +640,18 @@ app.post('/api/auth/check-password', async (req, res) => {
   if (!email || !password) return res.status(400).json({ error: 'Faltan campos' });
 
   try {
-    // Llamamos directamente a Supabase GoTrue — no persiste sesión en ningún cliente
-    const r = await fetch(`${SUPA_URL}/auth/v1/token?grant_type=password`, {
+    // Verificamos via función PostgreSQL (SECURITY DEFINER) — no depende de GoTrue
+    // ni de variables extra en Render. Funciona con anon key.
+    const ok = await supa('/rpc/verify_user_password', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'apikey': SUPA_KEY },
-      body: JSON.stringify({ email: email.trim().toLowerCase(), password }),
+      body: { p_email: email.trim().toLowerCase(), p_password: password },
+      prefer: '',
     });
-    if (!r.ok) {
+    if (!ok) {
       entry.count++;
       pwCheckAttempts.set(ip, entry);
       return res.status(401).json({ error: 'Email o contraseña incorrectos' });
     }
-    // Contraseña correcta — resetear contador
     pwCheckAttempts.delete(ip);
     res.json({ ok: true });
   } catch (e) {
