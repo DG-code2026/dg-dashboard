@@ -496,7 +496,10 @@ async function verifySupabaseJwt(token) {
   try {
     const { status, data } = await httpJson(`${SUPA_AUTH_URL}/user`, {
       method: 'GET',
-      headers: { apikey: SUPA_KEY, Authorization: `Bearer ${token}` },
+      // apikey: cualquier key válida del proyecto autoriza el gateway de auth.
+      // Usamos el effective key (service || anon) para no depender de que
+      // SUPABASE_KEY esté seteada — si sólo está el service key, igual valida.
+      headers: { apikey: SUPA_KEY || SUPA_EFFECTIVE_KEY, Authorization: `Bearer ${token}` },
       timeoutMs: 5000,
       retries: 0,
     });
@@ -1851,7 +1854,7 @@ const browserHeartbeat = setInterval(() => {
 }, 30000);
 wss.on('close', () => clearInterval(browserHeartbeat));
 
-app.get('/api/health', (req, res) => res.json({ status: 'ok', primary: primaryWs?.readyState === WebSocket.OPEN, supabase: !!SUPA_URL }));
+app.get('/api/health', (req, res) => res.json({ status: 'ok', primary: primaryWs?.readyState === WebSocket.OPEN, supabase: !!SUPA_URL, commit: (process.env.RENDER_GIT_COMMIT || '').slice(0, 7) || null }));
 
 // Diagnóstico del estado del WS Primary y antigüedad del último Md por ticker.
 // Útil para detectar "WS zombie": readyState=OPEN pero Primary no manda Md.
