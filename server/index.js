@@ -710,26 +710,32 @@ function baseUrlServer() {
   return process.env.RENDER_EXTERNAL_URL || process.env.SELF_PING_URL?.replace(/\/api\/health$/, '') || `http://localhost:${PORT}`;
 }
 
-// Arma el mail de víspera: lo que EMPIEZA mañana.
-async function armarVispera(hoyYmd) {
-  const manana = sumarDias(hoyYmd, 1);
-  const { registros, nombre, etiqueta } = await registrosEntre(manana, manana);
-  // Sólo lo que arranca mañana — no lo que ya venía corriendo.
-  const empiezan = registros.filter(r => r.desde === manana);
+// Arma el mail diario: lo que hay HOY.
+//
+// Sale a las 7 de la mañana, así que habla del día que arranca — no del
+// siguiente. Incluye todo lo que está vigente hoy, tanto lo que empieza como
+// lo que ya venía corriendo: si alguien está en la mitad de sus vacaciones,
+// sigue sin estar, y el mail tiene que decirlo.
+async function armarDiario(hoyYmd) {
+  const { registros, nombre, etiqueta } = await registrosEntre(hoyYmd, hoyYmd);
+  const fecha = fmtFechaLarga(hoyYmd);
   return {
-    hay: empiezan.length > 0,
-    registros: empiezan,
+    hay: registros.length > 0,
+    registros,
     nombre, etiqueta,
-    asunto: `Agenda · mañana ${fmtFechaLarga(manana)}`,
+    asunto: registros.length
+      ? `Agenda · hoy ${fecha}`
+      : `Agenda · hoy ${fecha} — sin eventos`,
     html: construirHtml({
-      titulo: 'Mañana en la agenda',
-      bajada: fmtFechaLarga(manana).replace(/^\w/, c => c.toUpperCase()),
-      registros: empiezan,
+      titulo: 'Hoy en la agenda',
+      bajada: fecha.replace(/^\w/, c => c.toUpperCase()),
+      registros,
       nombrePorPersona: nombre,
       etiquetaPorPersona: etiqueta,
-      linkIcs: `${baseUrlServer()}/api/agenda/ics?desde=${manana}&hasta=${manana}`,
+      vacioTxt: 'No hay eventos ni ausencias para hoy.',
+      linkIcs: registros.length ? `${baseUrlServer()}/api/agenda/ics?desde=${hoyYmd}&hasta=${hoyYmd}` : null,
     }),
-    ics: construirICS(empiezan, nombre),
+    ics: construirICS(registros, nombre),
   };
 }
 
@@ -770,28 +776,28 @@ app.get('/api/agenda/ics', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Preview en el browser, sin mandar nada. ?tipo=vispera|semanal
+// Preview en el browser, sin mandar nada. ?tipo=diario|semanal
 app.get('/api/agenda/preview', async (req, res) => {
   try {
-    const tipo = req.query.tipo === 'semanal' ? 'semanal' : 'vispera';
+    const tipo = req.query.tipo === 'semanal' ? 'semanal' : 'diario';
     // ?hoy=YYYY-MM-DD permite pararse en otra fecha para probar.
     const hoy = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.hoy)) ? String(req.query.hoy) : ymdEnAR();
-    const m = tipo === 'semanal' ? await armarSemanal(hoy) : await armarVispera(hoy);
+    const m = tipo === 'semanal' ? await armarSemanal(hoy) : await armarDiario(hoy);
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.send(m.html);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Envío manual, para probar de verdad una vez cargadas las credenciales.
-// ?tipo=vispera|semanal  ·  ?para=mail@dominio (por defecto, allowed_users)
+// ?tipo=diario|semanal  ·  ?para=mail@dominio (por defecto, allowed_users)
 app.post('/api/agenda/enviar', async (req, res) => {
   try {
     if (!mailConfigurado()) {
       return res.status(400).json({ error: 'falta configurar GMAIL_USER y GMAIL_APP_PASSWORD en el .env' });
     }
-    const tipo = req.query.tipo === 'semanal' ? 'semanal' : 'vispera';
+    const tipo = req.query.tipo === 'semanal' ? 'semanal' : 'diario';
     const hoy = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.hoy)) ? String(req.query.hoy) : ymdEnAR();
-    const m = tipo === 'semanal' ? await armarSemanal(hoy) : await armarVispera(hoy);
+    const m = tipo === 'semanal' ? await armarSemanal(hoy) : await armarDiario(hoy);
     const para = req.query.para ? [String(req.query.para)] : await destinatariosAgenda();
     const resultados = await enviarMail({ para, asunto: m.asunto, html: m.html, adjuntoIcs: m.ics });
     const fallaron = resultados.filter(r => !r.ok);
@@ -807,20 +813,16 @@ app.post('/api/agenda/enviar', async (req, res) => {
 });
 
 // Corre un envío automático, con guard de "una vez por día".
-let ultimaVispera = null;
+let ultimoDiario = null;
 let ultimaSemanal = null;
 
 async function correrAviso(tipo) {
   const hoy = ymdEnAR();
   try {
-    const m = tipo === 'semanal' ? await armarSemanal(hoy) : await armarVispera(hoy);
-    // La víspera sin nada agendado no se manda: nadie quiere un mail diario
-    // que diga "nada". El semanal sí sale siempre, aunque sea para confirmar
-    // que la semana está despejada.
-    if (tipo === 'vispera' && !m.hay) {
-      console.log(`[agenda] víspera ${hoy}: nada arranca mañana, no se envía`);
-      return { ok: true, enviado: false, motivo: 'sin_registros' };
-    }
+    const m = tipo === 'semanal' ? await armarSemanal(hoy) : await armarDiario(hoy);
+    // Los dos salen siempre, tengan o no registros: el diario sin nada dice
+    // explícitamente que no hay eventos, que es información útil (confirma
+    // que el sistema está vivo y que nadie se olvidó de cargar algo).
     if (!mailConfigurado()) {
       console.warn(`[agenda] ${tipo}: SMTP sin configurar, no se envía`);
       return { ok: false, motivo: 'sin_smtp' };
@@ -838,18 +840,18 @@ async function correrAviso(tipo) {
   }
 }
 
-// Scheduler: víspera 18:00 AR todos los días, semanal domingos 20:00 AR.
+// Scheduler: diario 7:00 AR todos los días, semanal domingos 20:00 AR.
 // Se chequea en el tick de un minuto en lugar de usar node-cron para no
 // depender de que el proceso esté vivo exactamente a esa hora: si el server
-// arranca entre 18:00 y 18:10, la víspera igual sale.
+// arranca entre 7:00 y 7:10, el diario igual sale.
 setInterval(() => {
   const { weekday, hour, minute } = getBuenosAiresParts();
   const m = hour * 60 + minute;
   const hoy = ymdEnAR();
 
-  if (ultimaVispera !== hoy && m >= 18 * 60 && m < 18 * 60 + 10) {
-    ultimaVispera = hoy;
-    correrAviso('vispera');
+  if (ultimoDiario !== hoy && m >= 7 * 60 && m < 7 * 60 + 10) {
+    ultimoDiario = hoy;
+    correrAviso('diario');
   }
   if (weekday === 'Sun' && ultimaSemanal !== hoy && m >= 20 * 60 && m < 20 * 60 + 10) {
     ultimaSemanal = hoy;

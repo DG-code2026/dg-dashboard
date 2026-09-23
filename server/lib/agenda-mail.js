@@ -175,10 +175,15 @@ function filaRegistro(r, nombrePorPersona, etiquetaPorPersona) {
     </tr>`;
 }
 
-export function construirHtml({ titulo, bajada, registros, nombrePorPersona, etiquetaPorPersona, linkIcs }) {
+export function construirHtml({ titulo, bajada, registros, nombrePorPersona, etiquetaPorPersona, linkIcs, vacioTxt }) {
+  // El mail diario sale todos los días aunque no haya nada: decirlo de forma
+  // explícita también es información — confirma que el sistema está vivo y
+  // que no es que alguien se olvidó de cargar algo.
   const filas = registros.length
     ? registros.map(r => filaRegistro(r, nombrePorPersona, etiquetaPorPersona)).join('')
-    : `<tr><td style="padding:20px 0;font:400 14px Arial,sans-serif;color:#5A6478;">Nada agendado.</td></tr>`;
+    : `<tr><td style="padding:22px 0;font:400 15px Arial,sans-serif;color:#5A6478;text-align:center;">
+         ${vacioTxt || 'Nada agendado.'}
+       </td></tr>`;
 
   return `<!doctype html>
 <html><body style="margin:0;padding:0;background:#F7F5F0;">
