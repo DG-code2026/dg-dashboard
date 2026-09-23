@@ -736,6 +736,13 @@ function LinksUtilesCard() {
           ))}
         </div>
       </div>
+
+      <div style={{ ...S.linksGroup, marginTop: 12 }}>
+        <div style={S.linksGroupLabel}>INSTITUCIONAL</div>
+        <div style={S.linksList}>
+          <InstitucionalPDFButton />
+        </div>
+      </div>
     </div>
   );
 }
@@ -959,6 +966,591 @@ function DiasHabilesCard() {
     </div>
   );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  PDF · PRESENTACIÓN INSTITUCIONAL
+//
+//  Genera un PDF A4 (794×1123px → 210×297mm) con la paleta institucional DG,
+//  el fondo pluma, logotipo DG, y el detalle de servicios para personas
+//  físicas y jurídicas como agentes productores de bolsa de Inviu y PPI.
+//
+//  Flujo:
+//    1. Se pre-renderiza la página A4 off-screen con position:fixed left:-9999px.
+//    2. Al click, se cargan html2canvas + jsPDF desde CDN (igual que Propuestas).
+//    3. html2canvas captura el nodo A4 a scale=2 → imagen 1588×2246px.
+//    4. jsPDF la inserta en una hoja A4 210×297mm y guarda el PDF.
+// ═══════════════════════════════════════════════════════════════════════════
+const PDF_A4_W = 794;
+const PDF_A4_H = 1123;
+
+// Paleta institucional D&G (subset de la de BondFlyerModal / PropuestasPage).
+const PDF_DG = {
+  bg:        '#0A0F1C',
+  blue:      '#6386AC',
+  cream:     '#FEF8E6',
+  creamDim:  'rgba(254,248,230,0.72)',
+  creamSoft: 'rgba(254,248,230,0.85)',
+  creamMute: 'rgba(254,248,230,0.48)',
+  line25:    'rgba(99,134,172,0.28)',
+  line50:    'rgba(99,134,172,0.55)',
+  panel:     'rgba(254,248,230,0.04)',
+  // Fondo de panel para logos: steel blue de la paleta DG (#6386AC)
+  // lightened pero con saturación alta de azul (HSL ~218°, 40%, 73%).
+  // Claramente azul institucional — no se confunde con blanco ni con
+  // gris neutro. Inviu verde y Pershing naranja contrastan bien; PPI
+  // navy se diferencia por el peso del trazo aunque comparta tonalidad.
+  paleSteel: '#A6C0DD',
+};
+
+// Carga dinámica de script (CDN). Reutiliza el patrón de PropuestasPage.
+function loadScript(src) {
+  return new Promise((res, rej) => {
+    if (document.querySelector(`script[src="${src}"]`)) { res(); return; }
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = res;
+    s.onerror = () => rej(new Error(`No se pudo cargar: ${src}`));
+    document.head.appendChild(s);
+  });
+}
+
+function InstitucionalPDFButton() {
+  const [busy, setBusy]     = useState(false);
+  const [err,  setErr]      = useState('');
+  const [hover, setHover]   = useState(false);
+  const flyerRef            = useRef(null);
+  const [bgUrl,    setBgUrl]    = useState(null);
+  // Logos de los brokers/ALyCs. Cada uno se carga independiente; si falta
+  // alguno (archivo no subido) se usa el fallback tipográfico en el render.
+  const [inviuUrl,    setInviuUrl]    = useState(null);
+  const [ppiUrl,      setPpiUrl]      = useState(null);
+  const [pershingUrl, setPershingUrl] = useState(null);
+  const [ibkrUrl,     setIbkrUrl]     = useState(null);
+
+  // Pre-renderiza el SVG fondo pluma a PNG con filtro brightness/contrast
+  // horneado, idéntico al pre-load de BondFlyerModal / PropuestasPage —
+  // necesario para que html2canvas rasterice bien el SVG (que tiene
+  // clipPath + PNG embebido en su origen).
+  useEffect(() => {
+    let cancelled = false;
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      if (cancelled) return;
+      try {
+        const c = document.createElement('canvas');
+        c.width  = img.naturalWidth  || 960;
+        c.height = img.naturalHeight || 540;
+        const ctx = c.getContext('2d');
+        ctx.filter = 'brightness(1.35) contrast(0.92) saturate(0.95)';
+        ctx.drawImage(img, 0, 0, c.width, c.height);
+        setBgUrl(c.toDataURL('image/png'));
+      } catch {
+        setBgUrl('/logos/fondo%20pluma.svg');
+      }
+    };
+    img.onerror = () => { if (!cancelled) setBgUrl('/logos/fondo%20pluma.svg'); };
+    img.src = '/logos/fondo%20pluma.svg';
+    return () => { cancelled = true; };
+  }, []);
+
+  // Pre-carga los 4 logos de brokers/ALyCs. Cada uno prueba png → avif →
+  // svg → jpg en cadena para que el usuario pueda guardar el archivo en
+  // cualquier formato dentro de client/public/logos/. Si todos fallan,
+  // el render usa el texto del label como fallback tipográfico.
+  useEffect(() => {
+    let cancelled = false;
+    const loadOne = (key, setter) => {
+      const exts = ['.png', '.avif', '.svg', '.jpg', '.jpeg'];
+      const tryAt = (i) => {
+        if (i >= exts.length || cancelled) return;
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = () => {
+          if (cancelled) return;
+          try {
+            const c = document.createElement('canvas');
+            c.width  = img.naturalWidth  || 200;
+            c.height = img.naturalHeight || 60;
+            const ctx = c.getContext('2d');
+            ctx.drawImage(img, 0, 0);
+            setter(c.toDataURL('image/png'));
+          } catch {}
+        };
+        img.onerror = () => tryAt(i + 1);
+        img.src = `/logos/${key}${exts[i]}`;
+      };
+      tryAt(0);
+    };
+    loadOne('inviu',    setInviuUrl);
+    loadOne('ppi',      setPpiUrl);
+    loadOne('pershing', setPershingUrl);
+    loadOne('ibkr',     setIbkrUrl);
+    return () => { cancelled = true; };
+  }, []);
+
+  const generate = async () => {
+    setBusy(true); setErr('');
+    try {
+      if (!window.html2canvas) await loadScript('https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js');
+      if (!window.jspdf)       await loadScript('https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js');
+      // Esperar al fondo pluma — el resto de las imágenes (DG + Inviu) van
+      // como <img src> directos, html2canvas las espera solo si useCORS=true.
+      if (!bgUrl) await new Promise(r => setTimeout(r, 500));
+      const node = flyerRef.current;
+      if (!node) throw new Error('Layout PDF no disponible');
+      const canvas = await window.html2canvas(node, {
+        backgroundColor: PDF_DG.bg,
+        scale: 2,
+        useCORS: true,
+        allowTaint: true,
+        logging: false,
+        width: PDF_A4_W,
+        height: PDF_A4_H,
+      });
+      const { jsPDF } = window.jspdf;
+      const pdf = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait' });
+      pdf.addImage(canvas.toDataURL('image/jpeg', 0.93), 'JPEG', 0, 0, 210, 297);
+      pdf.save('Delfino Gaviña - Presentación Institucional.pdf');
+    } catch (e) {
+      setErr(e.message || 'Error al generar el PDF');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const accent = '#6386AC';
+
+  const SOCIOS = [
+    { name: 'Juan Manuel Delfino',       phone: '+54 9 11 4071-7624', email: 'jdelfino@delfinogavina.com.ar' },
+    { name: 'Gonzalo Gaviña Alvarado',   phone: '+54 9 11 6373-3920', email: 'ggavina@delfinogavina.com.ar' },
+    { name: 'Julián Hary Beccar Varela', phone: '+54 9 11 5580-2756', email: 'jhbeccarvarela@delfinogavina.com.ar' },
+  ];
+
+  return (
+    <>
+      {/* ── Layout A4 off-screen (capturado por html2canvas) ── */}
+      {/* Estilos espejan IDÉNTICAMENTE los del flyer de PropuestasPage (FS):
+          mismo bg pluma + tint gradient, mismo header con DG + fecha, título
+          con hairlines, paneles con cream/blue, disclaimer en itálica, footer
+          con DG·INVERSIONES. Cualquier ajuste visual ahí debe replicarse acá. */}
+      <div aria-hidden="true" style={{ position: 'fixed', top: 0, left: '-9999px', zIndex: -1, pointerEvents: 'none' }}>
+        <div ref={flyerRef} style={IS.flyer}>
+          {/* Fondo pluma + tint gradient (idéntico a Propuestas) */}
+          <img
+            src={bgUrl || '/logos/fondo%20pluma.svg'}
+            alt=""
+            style={IS.bgImg}
+            crossOrigin="anonymous"
+            aria-hidden="true"
+          />
+          <div style={IS.bgTint} />
+
+          <div style={IS.content}>
+            {/* HEADER: logo DG (izq) + sub "Agentes Productores · CNV" (der) */}
+            <div style={IS.header}>
+              <img
+                src="/logos/DG%20tema%20oscuro.png"
+                alt="Delfino Gaviña"
+                style={IS.logo}
+                crossOrigin="anonymous"
+              />
+              <div style={IS.headerRight}>
+                <div style={IS.headerStamp}>AGENTES PRODUCTORES DE BOLSA</div>
+              </div>
+            </div>
+
+            {/* Hairline decorativo arriba del párrafo introductorio */}
+            <div style={IS.hairlineFull} />
+
+            {/* INTRO — párrafo institucional condensado */}
+            <p style={IS.intro}>
+              Con más de 30 años de trayectoria en el mercado de capitales argentino, brindamos
+              asesoramiento financiero integral a personas físicas y jurídicas. Ofrecemos
+              soluciones adaptadas a cada perfil de inversión, con acceso a instrumentos locales
+              e internacionales. Trabajamos con confianza, transparencia y cercanía para proteger
+              y potenciar el capital de nuestros clientes.
+            </p>
+
+            {/* BROKERS — 2 grupos lado a lado:
+                  ALyCs LOCALES (Inviu + PPI)
+                  BROKERS INTERNACIONALES (Pershing + IBKR)
+                Cada grupo tiene su label centrado arriba; cada logo va en
+                un panel pale-steel.
+                `scale` por logo compensa los whitespaces internos de
+                cada PNG → los 4 logos quedan visualmente del mismo tamaño
+                aunque sus archivos vengan con paddings distintos. */}
+            <div style={IS.brokersWrap}>
+              {[
+                { label: 'ALyCs LOCALES', items: [
+                  { key: 'inviu',    name: 'Inviu - ALyC Grupo Financiero Galicia', url: inviuUrl,    fallback: 'INVIU',    scale: 1.4                },
+                  { key: 'ppi',      name: 'Portfolio Personal Inversiones',        url: ppiUrl,      fallback: 'PPI',      scale: 1.5,  offsetY: 10 },
+                ]},
+                { label: 'BROKERS INTERNACIONALES', items: [
+                  { key: 'pershing', name: 'Bank Of New York Mellon - Pershing',    url: pershingUrl, fallback: 'PERSHING', scale: 1.8,  offsetY: 10 },
+                  { key: 'ibkr',     name: 'Interactive Brokers',                   url: ibkrUrl,     fallback: 'IBKR',     scale: 1.45               },
+                ]},
+              ].map(g => (
+                <div key={g.label} style={IS.brokersGroup}>
+                  <div style={IS.brokersGroupLabel}>{g.label}</div>
+                  <div style={IS.brokersGroupGrid}>
+                    {g.items.map(b => (
+                      <div key={b.key} style={IS.brokerBox}>
+                        <div style={IS.brokerLogoSlot}>
+                          {b.url ? (
+                            <img
+                              src={b.url}
+                              alt={b.name}
+                              style={{
+                                ...IS.brokerLogo,
+                                transform: `scale(${b.scale})`,
+                                // offsetY desplaza el logo verticalmente
+                                // dentro del slot (centered + offsetY).
+                                // Útil para PPI/Pershing cuyo lockup tiene
+                                // más whitespace arriba en el archivo.
+                                marginTop: b.offsetY || 0,
+                              }}
+                            />
+                          ) : (
+                            <div style={IS.brokerFallback}>{b.fallback}</div>
+                          )}
+                        </div>
+                        <div style={IS.brokerName}>{b.name}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* SERVICIOS — 2 columnas (PF / PJ) */}
+            <div style={IS.servicesRow}>
+              <div style={IS.servicesCol}>
+                <div style={IS.sectionLabel}>PERSONAS</div>
+                {[
+                  ['Renta Fija',           'Bonos Soberanos, letras y ONs.'],
+                  ['Renta Variable',       'Acciones locales, CEDEARs y ETFs.'],
+                  ['Fondos Comunes',       'Money market, renta fija y multiactivo en $ y USD.'],
+                  ['Inversiones Offshore', 'Cuentas en Pershing e Interactive Brokers.'],
+                  ['Cobertura Cambiaria',  'Dolarización y protección contra inflación.'],
+                  ['Cauciones & eCheqs',   'Colocaciones eficientes de corto plazo.'],
+                  ['Asesoramiento',        'Carteras a medida según perfil y horizonte.'],
+                ].map(([label, desc]) => (
+                  <div key={label} style={IS.serviceItem}>
+                    <div style={IS.serviceLabel}>{label}</div>
+                    <div style={IS.serviceDesc}>{desc}</div>
+                  </div>
+                ))}
+              </div>
+
+              <div style={IS.servicesDivider} />
+
+              <div style={{ ...IS.servicesCol, paddingRight: 0, paddingLeft: 22 }}>
+                <div style={IS.sectionLabel}>EMPRESAS</div>
+                {[
+                  ['Gestión de Liquidez',        'Cauciones, FCI money market y letras.'],
+                  ['eCheqs & MAV',               'Descuento de cheques y financiamiento PyME.'],
+                  ['Garantías SGR',              'Avales bursátiles para acceso al crédito.'],
+                  ['Tesorería Corporativa',      'Planificación financiera y cobertura cambiaria.'],
+                  ['Inversión Institucional',    'Carteras a medida y asset allocation.'],
+                  ['Gestión de Riesgo',          'Coberturas de tipo de cambio, tasas e inflación.'],
+                  ['Estructuración Financiera',  'Soluciones integrales para capital de trabajo.'],
+                ].map(([label, desc]) => (
+                  <div key={label} style={IS.serviceItem}>
+                    <div style={IS.serviceLabel}>{label}</div>
+                    <div style={IS.serviceDesc}>{desc}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* FOOTER — 3 grillas de contacto (sin label, pegadas al fondo
+                vía marginTop: auto del IS.footer en content flex-column).
+                Email usa contactEmail (Roboto sans-serif, más estrecho) para
+                que entre en un solo renglón aunque el dominio sea largo. */}
+            <div style={IS.footer}>
+              {SOCIOS.map(p => (
+                <div key={p.email} style={IS.contactCard}>
+                  <div style={IS.contactName}>{p.name}</div>
+                  <div style={IS.contactLine}>{p.phone}</div>
+                  <div style={IS.contactEmail}>{p.email}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Botón de descarga ── */}
+      <button
+        type="button"
+        disabled={busy}
+        onClick={generate}
+        onMouseEnter={() => !busy && setHover(true)}
+        onMouseLeave={() => setHover(false)}
+        style={{
+          ...S.linkRow,
+          borderLeft: `3px solid ${accent}`,
+          width: '100%',
+          textAlign: 'left',
+          fontFamily: 'inherit',
+          cursor: busy ? 'wait' : 'pointer',
+          ...(hover && !busy ? {
+            background: `linear-gradient(180deg, rgba(99,134,172,0.09) 0%, var(--bg-card) 70%)`,
+            transform: 'translateX(2px)',
+            borderColor: accent,
+          } : {}),
+        }}
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+          <span style={{ ...S.linkTitle, color: hover ? accent : 'var(--text)' }}>
+            PRESENTACIÓN INSTITUCIONAL
+          </span>
+          <span style={{ fontFamily: "'Roboto Mono',monospace", fontSize: 9, color: 'var(--text-dim)', letterSpacing: 1 }}>
+            Inviu · A4 PDF
+          </span>
+        </div>
+        <span style={{ ...S.linkArrow, color: hover ? accent : 'var(--text-dim)', fontSize: 11, whiteSpace: 'nowrap' }}>
+          {busy ? '…' : '↓ PDF'}
+        </span>
+      </button>
+      {err && (
+        <div style={{ fontFamily: "'Roboto Mono',monospace", fontSize: 9, color: '#ef4444', padding: '3px 4px', letterSpacing: 0.5 }}>
+          {err}
+        </div>
+      )}
+    </>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  IS · Institucional Styles
+//
+//  Espejan IDÉNTICAMENTE los del flyer de PropuestasPage (FS):
+//    - fuentes: Roboto (body) + Cormorant Garamond italic (título) + Roboto Mono (etiquetas)
+//    - paleta DG (navy, cream, blue, líneas line25/line50)
+//    - fondo pluma a opacity 1 con tint gradient encima
+//    - header con logo izquierda + fecha derecha
+//    - título centrado con hairlines a los costados
+//    - disclaimer en italic + centrado + bordes
+//    - footer con DG·INVERSIONES (izq) + fecha (der)
+//
+//  Cualquier ajuste visual en PropuestasPage debe replicarse acá.
+// ═══════════════════════════════════════════════════════════════════════════
+const IS = {
+  flyer: {
+    position: 'relative',
+    width: PDF_A4_W,
+    height: PDF_A4_H,
+    background: PDF_DG.bg,
+    color: PDF_DG.cream,
+    fontFamily: "'Roboto', sans-serif",
+    overflow: 'hidden',
+    boxSizing: 'border-box',
+  },
+  bgImg:  { position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', objectPosition: 'center', opacity: 1, zIndex: 0, pointerEvents: 'none' },
+  bgTint: { position: 'absolute', inset: 0, background: 'linear-gradient(180deg, rgba(10,15,28,0.10) 0%, rgba(10,15,28,0.38) 55%, rgba(10,15,28,0.62) 100%)', zIndex: 1, pointerEvents: 'none' },
+  content: {
+    position: 'relative', zIndex: 2,
+    // Padding lateral generoso (72px) — pedido por el usuario, márgenes más anchos
+    padding: '48px 72px 36px',
+    height: '100%', boxSizing: 'border-box',
+    display: 'flex', flexDirection: 'column',
+  },
+
+  // Header — logo izq + sub stamp en la esquina superior derecha
+  header:      { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 18 },
+  logo:        { height: 78, width: 'auto', display: 'block' },
+  headerRight: { textAlign: 'right', display: 'flex', flexDirection: 'column', alignItems: 'flex-end' },
+  // headerStamp: sello de esquina con borde fino, tipografía Roboto
+  // italic (todos los títulos del PDF comparten el slant italic para
+  // una jerarquía visual coherente).
+  headerStamp: {
+    fontFamily: "'Roboto', sans-serif",
+    fontSize: 8, fontWeight: 700, fontStyle: 'italic',
+    letterSpacing: 2.5,
+    color: '#FFFFFF',
+    padding: '5px 10px',
+    border: `1px solid ${PDF_DG.line25}`,
+    borderRadius: 2,
+    background: 'rgba(10,15,28,0.45)',
+    textTransform: 'uppercase',
+    whiteSpace: 'nowrap',
+  },
+
+  // Hairline horizontal full-width (separador entre header e intro)
+  hairlineFull: {
+    height: 1,
+    background: `linear-gradient(90deg, transparent, ${PDF_DG.line50}, transparent)`,
+    marginBottom: 22,
+  },
+
+  // Intro — párrafo institucional largo (texto principal del PDF).
+  // textIndent 30px → sangría en la primera línea (pedido del usuario).
+  // fontWeight 500 → un tono más bold que el default 400.
+  intro: {
+    fontFamily: "'Roboto', sans-serif",
+    fontSize: 12, lineHeight: 1.75, fontWeight: 500,
+    color: PDF_DG.cream,
+    margin: '0 0 24px', textAlign: 'justify', letterSpacing: 0.2,
+    textIndent: 30,
+  },
+
+  // Brokers — wrap exterior con 2 grupos lado a lado (ALyCs locales /
+  // Brokers internacionales). Cada grupo lleva su título arriba y abajo
+  // un grid de 2 columnas con los logos.
+  brokersWrap: {
+    display: 'grid',
+    gridTemplateColumns: '1fr 1fr',
+    gap: 28,
+    padding: '18px 0 22px',
+    marginBottom: 22,
+    borderTop: `1px solid ${PDF_DG.line25}`,
+    borderBottom: `1px solid ${PDF_DG.line25}`,
+  },
+  brokersGroup: { display: 'flex', flexDirection: 'column' },
+  // Labels secundarios de cada grupo (ALYCS LOCALES / BROKERS
+  // INTERNACIONALES). Roboto italic en blanco — comparte la inclinación
+  // del resto de los títulos.
+  brokersGroupLabel: {
+    fontFamily: "'Roboto', sans-serif",
+    fontSize: 10, fontWeight: 700, fontStyle: 'italic',
+    letterSpacing: 3,
+    color: '#FFFFFF',
+    textTransform: 'uppercase',
+    textAlign: 'center',
+    marginBottom: 14,
+  },
+  brokersGroupGrid: {
+    display: 'grid',
+    gridTemplateColumns: '1fr 1fr',
+    gap: 12,
+  },
+  brokerBox: {
+    display: 'flex', flexDirection: 'column', alignItems: 'center',
+    gap: 8, minWidth: 0,
+  },
+  // Slot con fondo PALE STEEL — tint claro derivado del steel blue de la
+  // paleta DG. Los logos institucionales se ven con sus colores originales
+  // (Inviu verde, PPI azul, Pershing azul/naranja, IBKR rojo) sin que el
+  // navy del PDF los apague.
+  // Aspect ratio landscape: 95px alto × ~155px ancho del grid = ratio
+  // ~1.6:1 (más ancho que alto). Padding interno mínimo + overflow:
+  // hidden permite que el logo (con transform: scale 1.25) llene el slot
+  // sin pasar al borde.
+  brokerLogoSlot: {
+    height: 95, width: '100%',
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    background: PDF_DG.paleSteel,
+    border: `1px solid ${PDF_DG.line25}`,
+    borderRadius: 4,
+    padding: '6px 8px',
+    boxSizing: 'border-box',
+    overflow: 'hidden',
+  },
+  // brokerLogo: base style. El `transform: scale(N)` lo aplica cada
+  // logo de forma individual desde su data (inviu 1.4, ppi 1.5,
+  // pershing 1.8, ibkr 1.45) para compensar el whitespace específico
+  // de cada PNG y que los 4 queden visualmente del mismo tamaño.
+  brokerLogo: {
+    maxHeight: '100%', maxWidth: '100%',
+    objectFit: 'contain',
+    transformOrigin: 'center',
+  },
+  // Fallback tipográfico cuando aún no se subió el archivo del logo.
+  // En navy (matchea el bg del slot cream) para legibilidad.
+  brokerFallback: {
+    fontFamily: "'Cormorant Garamond', Georgia, serif",
+    fontWeight: 700, fontStyle: 'italic',
+    fontSize: 30, letterSpacing: 3,
+    color: PDF_DG.bg,
+  },
+  // Caption descriptiva abajo del logo. Roboto sans-serif italic (mismo
+  // slant que el resto de los títulos). Permite wrap natural a 2 líneas
+  // para las captions largas (Inviu - ALyC Grupo Financiero Galicia,
+  // Bank Of New York Mellon - Pershing).
+  brokerName: {
+    fontFamily: "'Roboto', sans-serif",
+    fontSize: 8, fontWeight: 500, fontStyle: 'italic',
+    letterSpacing: 0.3,
+    color: '#FFFFFF',
+    textAlign: 'center',
+    lineHeight: 1.35,
+  },
+
+  // Servicios 2 columnas — 7 (PF) + 6 (Empresas). marginTop 22 da
+  // respiro extra entre la fila de brokers y los títulos PERSONAS/EMPRESAS.
+  servicesRow:     { display: 'flex', gap: 0, marginTop: 22, marginBottom: 18 },
+  servicesCol:     { flex: 1, paddingRight: 22, minWidth: 0 },
+  servicesDivider: { width: 1, background: PDF_DG.line25, flexShrink: 0, alignSelf: 'stretch' },
+
+  // Section labels (PERSONAS / EMPRESAS) — títulos principales de las
+  // columnas. Cormorant Garamond italic en BLANCO, alineados con el
+  // estilo del título de Propuestas, ~18px y centrado.
+  sectionLabel: {
+    fontFamily: "'Cormorant Garamond', Georgia, serif",
+    fontSize: 18, fontWeight: 600, fontStyle: 'italic',
+    letterSpacing: 4,
+    color: '#FFFFFF',
+    textTransform: 'uppercase',
+    marginBottom: 16,
+    textAlign: 'center',
+  },
+
+  serviceItem:  { marginBottom: 8 },
+  // Labels de cada servicio (Renta Fija, Gestión de Liquidez, etc.) en
+  // blanco e itálica — comparten la inclinación de los títulos PERSONAS
+  // y EMPRESAS para que la jerarquía visual se sienta coherente entre
+  // título de sección e ítems.
+  serviceLabel: { fontFamily: "'Roboto', sans-serif", fontSize: 12, fontWeight: 600, fontStyle: 'italic', color: '#FFFFFF', marginBottom: 2, letterSpacing: 0.2 },
+  // Description: subo a 9.5 + cambio a Roboto sans-serif (más legible que
+  // monospace a tamaños pequeños) manteniendo el color creamMute para
+  // diferenciarla del label.
+  serviceDesc:  { fontFamily: "'Roboto', sans-serif", fontSize: 9.5, fontWeight: 400, color: PDF_DG.creamDim, lineHeight: 1.45, letterSpacing: 0.1 },
+
+  // Footer = 3 grillas de contacto (sin label, ancladas al fondo).
+  // marginTop: auto empuja el bloque al fondo del content (que es
+  // flex-column) sin importar cuánto contenido haya arriba.
+  footer: {
+    marginTop: 'auto',
+    display: 'grid',
+    gridTemplateColumns: 'repeat(3, 1fr)',
+    gap: 14,
+    paddingTop: 16,
+    borderTop: `1px solid ${PDF_DG.line25}`,
+    flexShrink: 0,
+  },
+  // Card de contacto compacto, centrado. alignItems + textAlign centran
+  // el nombre, teléfono y email en cada card. Padding horizontal reducido
+  // para ganar ancho útil en el renglón del email.
+  contactCard: {
+    padding: '11px 11px',
+    background: PDF_DG.panel,
+    border: `1px solid ${PDF_DG.line25}`,
+    borderRadius: 4,
+    display: 'flex', flexDirection: 'column',
+    alignItems: 'center',
+    textAlign: 'center',
+    gap: 3,
+    minWidth: 0, overflow: 'hidden',
+  },
+  contactName: { fontFamily: "'Roboto', sans-serif", fontSize: 10.5, fontWeight: 500, fontStyle: 'italic', color: '#FFFFFF', letterSpacing: 0.3, whiteSpace: 'nowrap', textAlign: 'center' },
+  // Teléfono — mono (look de "número/dato"). nowrap fuerza una línea.
+  contactLine:  { fontFamily: "'Roboto Mono', monospace", fontSize: 9, color: PDF_DG.creamDim, letterSpacing: 0.3, whiteSpace: 'nowrap', textAlign: 'center' },
+  // Email — Roboto sans-serif (más estrecho que monospace, entra cómodo
+  // en una línea aunque el dominio sea largo). nowrap + ellipsis como
+  // safety net si algún email superara los ~36 chars.
+  contactEmail: {
+    fontFamily: "'Roboto', sans-serif",
+    fontSize: 9, fontWeight: 400, color: PDF_DG.creamDim,
+    letterSpacing: 0.1,
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    textAlign: 'center',
+    maxWidth: '100%',
+  },
+};
 
 // ─── Estilos ───
 const S = {
