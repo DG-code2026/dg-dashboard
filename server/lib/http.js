@@ -43,6 +43,10 @@ function shouldRetry(err) {
   if (!err) return false;
   if (err.kind === 'timeout' || err.kind === 'network') return true;
   if (err.kind === 'http' && err.status >= 500) return true;
+  // Un body que no parsea casi siempre es una respuesta cortada, vacía o una
+  // página de error del proxy: transitorio. Reintentar es barato y evita
+  // perder el dato por una respuesta mal formada.
+  if (err.kind === 'parse') return true;
   return false;
 }
 
@@ -81,19 +85,30 @@ export async function httpJson(url, opts = {}) {
       });
 
       const text = await res.text();
+
+      // El status se mira ANTES de parsear. Si no, un 502/503 que devuelve una
+      // página HTML de error explota como "Invalid JSON" — un error de parseo,
+      // que no es retry-able — y la llamada se pierde para siempre en vez de
+      // reintentarse. Era exactamente lo que hacía desaparecer filas enteras de
+      // las grillas de renta fija cuando PPI se ponía lento.
+      if (res.status >= 500) {
+        throw new HttpError(`HTTP ${res.status} from ${url}: ${text.slice(0, 160)}`, { kind: 'http', status: res.status });
+      }
+
       let data;
       if (parseAs === 'text') {
         data = text;
       } else {
         try { data = text ? JSON.parse(text) : null; }
         catch (e) {
-          throw new HttpError(`Invalid JSON from ${url}`, { kind: 'parse', status: res.status, cause: e });
+          // Un body cortado o vacío con status 2xx suele ser transitorio, así
+          // que lo dejamos entrar al retry. Incluimos un fragmento del body
+          // para poder diagnosticar qué devolvió realmente el servidor.
+          throw new HttpError(
+            `Invalid JSON from ${url} (HTTP ${res.status}): ${text.slice(0, 160)}`,
+            { kind: 'parse', status: res.status, cause: e },
+          );
         }
-      }
-
-      if (res.status >= 500) {
-        // Lo tratamos como retry-able. Tiramos para que entre al catch de abajo.
-        throw new HttpError(`HTTP ${res.status} from ${url}`, { kind: 'http', status: res.status });
       }
 
       return { status: res.status, data, headers: res.headers };

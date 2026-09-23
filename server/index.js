@@ -3,9 +3,6 @@ import express from 'express';
 import cors from 'cors';
 import { WebSocketServer, WebSocket } from 'ws';
 import http from 'http';
-import bcrypt from 'bcryptjs';
-import jwt from 'jsonwebtoken';
-import twilio from 'twilio';
 import cron from 'node-cron';
 import Parser from 'rss-parser';
 import { httpJson, singleflight, HttpError } from './lib/http.js';
@@ -466,6 +463,180 @@ app.delete('/api/db/fondos-pershing/:isin', async (req, res) => {
 });
 
 // ══════════════════════════════════════════════
+//  VACACIONES — participantes + registros de ausencia
+//
+//  Dos tablas en Supabase:
+//    - `vacaciones_personas`: las etiquetas (JMD/GGA/FD/JH son primarias y
+//      vienen sembradas; el resto se crean desde la UI para gente sin login).
+//    - `vacaciones`: un registro por período, con rango desde/hasta, tipo y
+//      descripción. Los rangos SÍ pueden solaparse entre personas — mostrar
+//      esos solapamientos es el punto de la vista timeline.
+//
+//  Permisos: cualquier usuario del dashboard carga/edita/borra por cualquier
+//  persona (equipo chico, sin flujo de aprobación). Se guarda `creado_por`
+//  con el email del que cargó, sólo como rastro de auditoría.
+// ══════════════════════════════════════════════
+
+const VAC_TIPOS = ['vacaciones', 'licencia', 'estudio', 'home_office', 'personal'];
+const VAC_ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+// ── Personas ──
+
+app.get('/api/db/vacaciones-personas', async (req, res) => {
+  try {
+    const data = await supa('/vacaciones_personas?activo=eq.true&order=orden.asc,etiqueta.asc');
+    res.json(Array.isArray(data) ? data : []);
+  } catch (e) { console.error('DB GET vacaciones_personas:', e); res.json([]); }
+});
+
+app.post('/api/db/vacaciones-personas', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const etiqueta = String(body.etiqueta || '').trim().toUpperCase();
+    const nombre   = String(body.nombre   || '').trim();
+    if (!etiqueta || !nombre) return res.status(400).json({ error: 'etiqueta y nombre son obligatorios' });
+    if (!/^[A-Z0-9]{2,6}$/.test(etiqueta)) return res.status(400).json({ error: 'la etiqueta debe ser de 2 a 6 caracteres alfanuméricos' });
+
+    const existing = await supa(`/vacaciones_personas?etiqueta=eq.${encodeURIComponent(etiqueta)}`);
+    if (Array.isArray(existing) && existing.length > 0) {
+      // Si la etiqueta existe pero está dada de baja, la reactivamos en lugar
+      // de rechazar el alta — evita el callejón sin salida de "ya existe"
+      // para algo que el usuario no ve en la lista.
+      if (existing[0].activo === false) {
+        const r = await supa(`/vacaciones_personas?etiqueta=eq.${encodeURIComponent(etiqueta)}`, {
+          method: 'PATCH',
+          body: { activo: true, nombre, color: body.color || existing[0].color, updated_at: new Date().toISOString() },
+        });
+        return res.json(Array.isArray(r) ? r[0] : r);
+      }
+      return res.status(409).json({ error: `ya existe una persona con etiqueta ${etiqueta}` });
+    }
+
+    const r = await supa('/vacaciones_personas', {
+      method: 'POST',
+      body: {
+        etiqueta,
+        nombre,
+        email:    body.email ? String(body.email).trim() : null,
+        color:    body.color || '#8b95a5',
+        primaria: false,
+        orden:    Number.isFinite(+body.orden) ? +body.orden : 100,
+      },
+    });
+    res.json(Array.isArray(r) ? r[0] : r);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.patch('/api/db/vacaciones-personas/:id', async (req, res) => {
+  try {
+    const patch = { updated_at: new Date().toISOString() };
+    if (req.body?.nombre != null) patch.nombre = String(req.body.nombre).trim();
+    if (req.body?.color  != null) patch.color  = String(req.body.color).trim();
+    if (req.body?.email  != null) patch.email  = String(req.body.email).trim() || null;
+    if (req.body?.orden  != null) patch.orden  = +req.body.orden;
+    const r = await supa(`/vacaciones_personas?id=eq.${encodeURIComponent(req.params.id)}`, { method: 'PATCH', body: patch });
+    res.json(Array.isArray(r) ? r[0] : r);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Baja lógica: las primarias no se pueden dar de baja (son el equipo fijo), y
+// borrar una persona con registros se llevaría puestas sus vacaciones por el
+// ON DELETE CASCADE. Por eso siempre desactivamos en vez de borrar.
+app.delete('/api/db/vacaciones-personas/:id', async (req, res) => {
+  try {
+    const id = encodeURIComponent(req.params.id);
+    const rows = await supa(`/vacaciones_personas?id=eq.${id}`);
+    const persona = Array.isArray(rows) ? rows[0] : null;
+    if (!persona) return res.status(404).json({ error: 'persona no encontrada' });
+    if (persona.primaria) return res.status(400).json({ error: 'las etiquetas primarias no se pueden dar de baja' });
+    await supa(`/vacaciones_personas?id=eq.${id}`, { method: 'PATCH', body: { activo: false, updated_at: new Date().toISOString() } });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Registros ──
+
+// GET acepta ?from=YYYY-MM-DD&to=YYYY-MM-DD para acotar al rango visible.
+// El filtro trae todo lo que SOLAPA la ventana (hasta>=from && desde<=to), no
+// sólo lo que empieza adentro — si no, un período que arranca en diciembre y
+// termina en enero desaparecería de la vista de enero.
+app.get('/api/db/vacaciones', async (req, res) => {
+  try {
+    const qs = ['order=desde.desc'];
+    const from = String(req.query.from || '');
+    const to   = String(req.query.to   || '');
+    if (VAC_ISO_DATE.test(from)) qs.push(`hasta=gte.${from}`);
+    if (VAC_ISO_DATE.test(to))   qs.push(`desde=lte.${to}`);
+    const data = await supa(`/vacaciones?${qs.join('&')}`);
+    res.json(Array.isArray(data) ? data : []);
+  } catch (e) { console.error('DB GET vacaciones:', e); res.json([]); }
+});
+
+app.post('/api/db/vacaciones', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const persona_id = String(body.persona_id || '').trim();
+    const desde = String(body.desde || '').trim();
+    const hasta = String(body.hasta || '').trim();
+    const tipo  = String(body.tipo  || 'vacaciones').trim();
+
+    if (!persona_id) return res.status(400).json({ error: 'persona_id es obligatorio' });
+    if (!VAC_ISO_DATE.test(desde) || !VAC_ISO_DATE.test(hasta)) return res.status(400).json({ error: 'desde y hasta deben ser fechas YYYY-MM-DD' });
+    if (hasta < desde) return res.status(400).json({ error: 'la fecha de fin no puede ser anterior a la de inicio' });
+    if (!VAC_TIPOS.includes(tipo)) return res.status(400).json({ error: `tipo inválido (${VAC_TIPOS.join(', ')})` });
+
+    const r = await supa('/vacaciones', {
+      method: 'POST',
+      body: {
+        persona_id, desde, hasta, tipo,
+        descripcion: body.descripcion ? String(body.descripcion).trim() : null,
+        creado_por:  body.creado_por ? String(body.creado_por).trim() : null,
+      },
+    });
+    res.json(Array.isArray(r) ? r[0] : r);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.patch('/api/db/vacaciones/:id', async (req, res) => {
+  try {
+    const b = req.body || {};
+    const patch = { updated_at: new Date().toISOString() };
+    if (b.persona_id  != null) patch.persona_id  = String(b.persona_id).trim();
+    if (b.descripcion != null) patch.descripcion = String(b.descripcion).trim() || null;
+    if (b.desde != null) {
+      if (!VAC_ISO_DATE.test(String(b.desde))) return res.status(400).json({ error: 'desde inválido' });
+      patch.desde = String(b.desde);
+    }
+    if (b.hasta != null) {
+      if (!VAC_ISO_DATE.test(String(b.hasta))) return res.status(400).json({ error: 'hasta inválido' });
+      patch.hasta = String(b.hasta);
+    }
+    if (b.tipo != null) {
+      if (!VAC_TIPOS.includes(String(b.tipo))) return res.status(400).json({ error: 'tipo inválido' });
+      patch.tipo = String(b.tipo);
+    }
+    // Si sólo llega una de las dos puntas, validamos contra la guardada.
+    if (patch.desde || patch.hasta) {
+      const rows = await supa(`/vacaciones?id=eq.${encodeURIComponent(req.params.id)}`);
+      const actual = Array.isArray(rows) ? rows[0] : null;
+      if (!actual) return res.status(404).json({ error: 'registro no encontrado' });
+      const d = patch.desde || actual.desde;
+      const h = patch.hasta || actual.hasta;
+      if (h < d) return res.status(400).json({ error: 'la fecha de fin no puede ser anterior a la de inicio' });
+    }
+    const r = await supa(`/vacaciones?id=eq.${encodeURIComponent(req.params.id)}`, { method: 'PATCH', body: patch });
+    res.json(Array.isArray(r) ? r[0] : r);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/db/vacaciones/:id', async (req, res) => {
+  try {
+    await supa(`/vacaciones?id=eq.${encodeURIComponent(req.params.id)}`, { method: 'DELETE' });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ══════════════════════════════════════════════
 //  AUTH — Supabase Auth multi-usuario con whitelist (allowed_users)
 //
 //  - El cliente se autentica contra Supabase Auth (email/pass o Google).
@@ -622,357 +793,6 @@ app.post('/api/auth/refresh-whitelist', requireAdmin, async (_req, res) => {
   res.json({ ok: true, count: whitelistCache.items.size });
 });
 
-
-// ══════════════════════════════════════════════
-//  CLIENTES (DB de clientes con login gate)
-//
-//  - Auth: bcrypt-verified password → JWT (HS256, 8h TTL) en header
-//    `Authorization: Bearer <token>`. La clave hasheada vive en
-//    CLIENTES_PASSWORD_HASH; rotala generando un nuevo hash con bcryptjs.
-//  - Acceso: todos los endpoints /api/clientes/* (excepto /login) requieren
-//    el JWT válido. Si se cae la verificación → 401.
-//  - Storage: tabla `clientes` en Supabase (ver server/clientes_schema.sql).
-// ══════════════════════════════════════════════
-const CLIENTES_PASS_HASH = process.env.CLIENTES_PASSWORD_HASH || '';
-const CLIENTES_JWT_SECRET = process.env.CLIENTES_JWT_SECRET || '';
-const CLIENTES_JWT_TTL = '8h';
-
-function requireClientesAuth(req, res, next) {
-  const auth = req.headers.authorization || '';
-  const m = auth.match(/^Bearer\s+(.+)$/i);
-  if (!m) return res.status(401).json({ error: 'unauthorized' });
-  try {
-    jwt.verify(m[1], CLIENTES_JWT_SECRET);
-    return next();
-  } catch {
-    return res.status(401).json({ error: 'unauthorized' });
-  }
-}
-
-// Login: comparamos con bcrypt (timing-safe). Pequeño rate-limit en memoria
-// por IP para frenar fuerza bruta básica.
-const loginAttempts = new Map(); // ip → { count, lockUntil }
-const LOGIN_MAX = 5;
-const LOGIN_WINDOW_MS = 15 * 60 * 1000;
-
-app.post('/api/clientes/login', async (req, res) => {
-  const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown').toString().split(',')[0].trim();
-  const now = Date.now();
-  const rec = loginAttempts.get(ip);
-  if (rec && rec.lockUntil > now) {
-    return res.status(429).json({ error: 'too many attempts', retryAfterSeconds: Math.ceil((rec.lockUntil - now) / 1000) });
-  }
-  const { password } = req.body || {};
-  if (typeof password !== 'string' || !password) {
-    return res.status(400).json({ error: 'password required' });
-  }
-  if (!CLIENTES_PASS_HASH || !CLIENTES_JWT_SECRET) {
-    return res.status(500).json({ error: 'server not configured (missing CLIENTES_PASSWORD_HASH or CLIENTES_JWT_SECRET in .env)' });
-  }
-  const ok = await bcrypt.compare(password, CLIENTES_PASS_HASH);
-  if (!ok) {
-    const cur = rec || { count: 0, lockUntil: 0 };
-    cur.count += 1;
-    if (cur.count >= LOGIN_MAX) {
-      cur.lockUntil = now + LOGIN_WINDOW_MS;
-      cur.count = 0;
-    }
-    loginAttempts.set(ip, cur);
-    return res.status(401).json({ error: 'invalid password' });
-  }
-  loginAttempts.delete(ip);
-  const token = jwt.sign({ scope: 'clientes' }, CLIENTES_JWT_SECRET, { expiresIn: CLIENTES_JWT_TTL });
-  res.json({ token, expiresIn: CLIENTES_JWT_TTL });
-});
-
-// Verificación rápida de token (para que el front sepa si la sesión sigue viva)
-app.get('/api/clientes/me', requireClientesAuth, (_req, res) => res.json({ ok: true }));
-
-// LIST: search (q) + filtros opcionales (broker, asesor, tipo_cuenta) + orden.
-// Devuelve TODOS los matches — la tabla son ~1k filas, no necesitamos
-// paginación server-side y el front filtra/ordena cómodo en memoria.
-app.get('/api/db/clientes', requireClientesAuth, async (req, res) => {
-  try {
-    const params = new URLSearchParams();
-    params.set('order', 'nombre.asc');
-    if (req.query.broker) params.set('broker', `eq.${req.query.broker}`);
-    if (req.query.asesor) params.set('asesor', `eq.${req.query.asesor}`);
-    if (req.query.tipo_cuenta) params.set('tipo_cuenta', `eq.${req.query.tipo_cuenta}`);
-    if (req.query.q) {
-      const q = String(req.query.q).replace(/[*%,()]/g, ' ').trim();
-      if (q) params.set('or', `(nombre.ilike.*${q}*,email.ilike.*${q}*,comitente.ilike.*${q}*,telefono.ilike.*${q}*)`);
-    }
-    const data = await supa(`/clientes?${params.toString()}`);
-    res.json(Array.isArray(data) ? data : []);
-  } catch (e) {
-    console.error('GET /api/db/clientes:', e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// Helper: valida y normaliza payload antes de mandar a Supabase.
-function sanitizeClienteBody(body = {}) {
-  const out = {};
-  const txt = (v) => (v === null || v === undefined) ? null : String(v).trim() || null;
-  if ('nombre' in body)           out.nombre = txt(body.nombre);
-  if ('email' in body)            out.email = txt(body.email);
-  if ('comitente' in body)        out.comitente = txt(body.comitente);
-  if ('broker' in body)           out.broker = txt(body.broker);
-  if ('telefono' in body)         out.telefono = txt(body.telefono);
-  if ('telefono_raw' in body)     out.telefono_raw = txt(body.telefono_raw);
-  if ('asesor' in body)           out.asesor = txt(body.asesor);
-  if ('tipo_cuenta' in body) {
-    const t = txt(body.tipo_cuenta);
-    out.tipo_cuenta = (t === 'PF' || t === 'PJ') ? t : null;
-  }
-  if ('fecha_nacimiento' in body) {
-    const d = txt(body.fecha_nacimiento);
-    // Esperamos YYYY-MM-DD. Si viene otra cosa, intentamos parsearla.
-    if (d && /^\d{4}-\d{2}-\d{2}$/.test(d)) out.fecha_nacimiento = d;
-    else if (d) {
-      const parsed = new Date(d);
-      out.fecha_nacimiento = isNaN(parsed) ? null : parsed.toISOString().slice(0, 10);
-    } else out.fecha_nacimiento = null;
-  }
-  return out;
-}
-
-app.post('/api/db/clientes', requireClientesAuth, async (req, res) => {
-  try {
-    const body = sanitizeClienteBody(req.body);
-    if (!body.nombre) return res.status(400).json({ error: 'nombre required' });
-    const data = await supa('/clientes', { method: 'POST', body });
-    res.json(Array.isArray(data) ? data[0] : data);
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-// Bulk insert — recibe array, lo sanitiza y manda en una sola llamada.
-app.post('/api/db/clientes/bulk', requireClientesAuth, async (req, res) => {
-  try {
-    const rows = Array.isArray(req.body) ? req.body : req.body?.rows;
-    if (!Array.isArray(rows) || rows.length === 0) return res.status(400).json({ error: 'rows array required' });
-    const clean = rows
-      .map(sanitizeClienteBody)
-      .filter(r => r.nombre);
-    if (clean.length === 0) return res.status(400).json({ error: 'no valid rows (nombre required on each)' });
-    // Supabase REST: POST a /clientes con array hace bulk insert
-    const data = await supa('/clientes', { method: 'POST', body: clean });
-    res.json({ inserted: Array.isArray(data) ? data.length : 0 });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.patch('/api/db/clientes/:id', requireClientesAuth, async (req, res) => {
-  try {
-    const id = parseInt(req.params.id, 10);
-    if (!id) return res.status(400).json({ error: 'invalid id' });
-    const body = sanitizeClienteBody(req.body);
-    body.updated_at = new Date().toISOString();
-    const data = await supa(`/clientes?id=eq.${id}`, { method: 'PATCH', body });
-    res.json(Array.isArray(data) ? data[0] : data);
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.delete('/api/db/clientes/:id', requireClientesAuth, async (req, res) => {
-  try {
-    const id = parseInt(req.params.id, 10);
-    if (!id) return res.status(400).json({ error: 'invalid id' });
-    await supa(`/clientes?id=eq.${id}`, { method: 'DELETE' });
-    res.json({ ok: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-// ══════════════════════════════════════════════
-//  CRON: cumpleaños del día → WhatsApp a asesores
-//
-//  Disparo: HTTP POST a /api/cron/birthday-whatsapp con header
-//  `X-Cron-Secret: <CRON_SECRET>`. Configurar cron-job.org (gratis) para
-//  llamar todos los días a las 09:00 ART:
-//     URL:    https://<tu-server>/api/cron/birthday-whatsapp
-//     Method: POST
-//     Header: X-Cron-Secret: <valor de CRON_SECRET>
-//     Schedule: 0 12 * * *  (12 UTC = 09 ART)
-//
-//  El endpoint también acepta ?dry=1 para previsualizar el mensaje sin enviar.
-// ══════════════════════════════════════════════
-const TWILIO_SID   = process.env.TWILIO_ACCOUNT_SID;
-const TWILIO_TOKEN = process.env.TWILIO_AUTH_TOKEN;
-const TWILIO_FROM  = process.env.TWILIO_WHATSAPP_FROM;
-const TWILIO_TEMPLATE_SID = process.env.TWILIO_TEMPLATE_SID || '';
-const CRON_SECRET  = process.env.CRON_SECRET || '';
-
-let twilioClient = null;
-function getTwilio() {
-  if (twilioClient) return twilioClient;
-  if (!TWILIO_SID || !TWILIO_TOKEN || TWILIO_TOKEN.startsWith('__')) return null;
-  twilioClient = twilio(TWILIO_SID, TWILIO_TOKEN);
-  return twilioClient;
-}
-
-// Mapa asesor → whatsapp:+<num>. Las keys se normalizan (mayúsculas, sin
-// acentos) para tolerar "GAVIÑA" / "GAVINA" / "gaviña ".
-function normAsesor(s) {
-  return String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').trim().toUpperCase();
-}
-const ADVISOR_TO_WHATSAPP = {
-  DELFINO: process.env.ADVISOR_WHATSAPP_DELFINO,
-  GAVINA:  process.env.ADVISOR_WHATSAPP_GAVINA,
-};
-
-function formatPhoneDisplay(p) {
-  if (!p) return '';
-  // Tomamos el formato +54 11 XXXXXXXX y lo dejamos legible
-  return p.replace(/^\+/, '').replace(/(\d{2})\s?(\d{2,3})\s?(\d+)/, '+$1 $2 $3');
-}
-
-function buildBirthdayMessage(clientes) {
-  const lines = [`🎂 Cumpleaños de hoy (${clientes.length})`, ''];
-  for (const c of clientes) {
-    const edad = c._edad != null ? `cumple ${c._edad}` : '';
-    const head = `• ${c.nombre}${edad ? ' — ' + edad : ''}`;
-    const tel  = c.telefono ? `📞 ${c.telefono}` : '';
-    const com  = c.comitente ? `Com. ${c.comitente}${c.broker ? ' (' + c.broker + ')' : ''}` : '';
-    const meta = [tel, com].filter(Boolean).join(' · ');
-    lines.push(head);
-    if (meta) lines.push('  ' + meta);
-  }
-  return lines.join('\n');
-}
-
-// Devuelve {month, day} para la zona horaria de Argentina (UTC-3, sin DST).
-function todayInArgentina() {
-  const now = new Date();
-  // formatToParts en es-AR con TZ explícito → sin sorpresas DST.
-  const parts = new Intl.DateTimeFormat('es-AR', {
-    timeZone: 'America/Argentina/Buenos_Aires',
-    year: 'numeric', month: '2-digit', day: '2-digit',
-  }).formatToParts(now);
-  const get = (t) => parts.find(p => p.type === t)?.value;
-  return { year: +get('year'), month: +get('month'), day: +get('day') };
-}
-
-async function fetchBirthdaysToday() {
-  const { month, day } = todayInArgentina();
-  // PostgREST no soporta extract(); traemos toda la tabla (es chica) y
-  // filtramos en memoria. Para ~1k filas es instantáneo.
-  const all = await supa('/clientes?select=nombre,telefono,comitente,broker,asesor,fecha_nacimiento,tipo_cuenta');
-  const todayList = (Array.isArray(all) ? all : []).filter(c => {
-    if (!c.fecha_nacimiento) return false;
-    const d = new Date(c.fecha_nacimiento + 'T00:00:00');
-    return d.getUTCMonth() + 1 === month && d.getUTCDate() === day;
-  });
-  // calcular edad que cumplen hoy
-  const yearNow = todayInArgentina().year;
-  return todayList.map(c => {
-    const d = new Date(c.fecha_nacimiento + 'T00:00:00');
-    return { ...c, _edad: yearNow - d.getUTCFullYear() };
-  });
-}
-
-async function sendWhatsApp(to, body) {
-  const client = getTwilio();
-  if (!client) throw new Error('Twilio no está configurado (faltan TWILIO_ACCOUNT_SID/AUTH_TOKEN en .env)');
-  const payload = { from: TWILIO_FROM, to };
-  if (TWILIO_TEMPLATE_SID) {
-    // Modo template aprobado: se asume que la plantilla tiene UNA variable
-    // {{1}} que recibe el cuerpo entero (Meta no permite > ~1024 chars).
-    payload.contentSid = TWILIO_TEMPLATE_SID;
-    payload.contentVariables = JSON.stringify({ 1: body.slice(0, 1000) });
-  } else {
-    payload.body = body;
-  }
-  return client.messages.create(payload);
-}
-
-// Retry con backoff exponencial — sólo reintenta errores transient (network,
-// 5xx, 429). Errores 4xx (número inválido, opt-in faltante) NO se reintentan
-// porque van a fallar igual.
-async function sendWhatsAppWithRetry(to, body, maxAttempts = 3) {
-  let lastErr;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      return await sendWhatsApp(to, body);
-    } catch (e) {
-      lastErr = e;
-      const status = e?.status || e?.code;
-      const transient = !status || status >= 500 || status === 429 || /timeout|network/i.test(String(e?.message));
-      if (!transient || attempt === maxAttempts) throw e;
-      const delay = Math.min(1000 * 2 ** (attempt - 1), 8000);
-      console.warn(`[whatsapp] intento ${attempt} a ${to} falló (${e.message}). Reintento en ${delay}ms`);
-      await new Promise(r => setTimeout(r, delay));
-    }
-  }
-  throw lastErr;
-}
-
-// Lógica del job — se invoca tanto desde node-cron como desde el endpoint
-// HTTP manual. `opts.dry` previsualiza sin enviar. `opts.only` filtra asesores.
-async function runBirthdayJob(opts = {}) {
-  const clientes = await fetchBirthdaysToday();
-  if (clientes.length === 0) {
-    return { ok: true, sent: 0, total: 0, reason: 'no birthdays today', date: todayInArgentina() };
-  }
-  const byAdvisor = {};
-  for (const c of clientes) {
-    const key = normAsesor(c.asesor);
-    (byAdvisor[key] ||= []).push(c);
-  }
-  if (opts.only) {
-    const allowed = new Set(String(opts.only).split(',').map(s => normAsesor(s)));
-    for (const k of Object.keys(byAdvisor)) {
-      if (!allowed.has(k)) delete byAdvisor[k];
-    }
-  }
-  const results = [];
-  for (const [advisorKey, list] of Object.entries(byAdvisor)) {
-    const to = ADVISOR_TO_WHATSAPP[advisorKey];
-    const body = buildBirthdayMessage(list);
-    if (!to) {
-      results.push({ asesor: advisorKey, count: list.length, status: 'skipped', reason: 'no whatsapp configured' });
-      continue;
-    }
-    if (opts.dry) {
-      results.push({ asesor: advisorKey, count: list.length, status: 'dry-run', to, body });
-      continue;
-    }
-    try {
-      const m = await sendWhatsAppWithRetry(to, body);
-      results.push({ asesor: advisorKey, count: list.length, status: 'sent', to, sid: m.sid });
-    } catch (e) {
-      console.error(`[cron whatsapp] error final mandando a ${advisorKey} (${to}):`, e.message);
-      results.push({ asesor: advisorKey, count: list.length, status: 'error', to, error: e.message });
-    }
-  }
-  return { ok: true, date: todayInArgentina(), total: clientes.length, results };
-}
-
-app.post('/api/cron/birthday-whatsapp', async (req, res) => {
-  const provided = req.headers['x-cron-secret'] || req.query.secret || '';
-  if (!CRON_SECRET || provided !== CRON_SECRET) {
-    return res.status(401).json({ error: 'unauthorized' });
-  }
-  try {
-    const r = await runBirthdayJob({
-      dry:  req.query.dry === '1' || req.query.dry === 'true',
-      only: req.query.only,
-    });
-    res.json(r);
-  } catch (e) {
-    console.error('[cron whatsapp] fatal:', e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// Scheduler interno (node-cron) — 9 AM hora Argentina, todos los días.
-// Si el server está vivo, no necesita ningún disparador externo.
-cron.schedule('0 9 * * *', async () => {
-  console.log('[node-cron] disparo birthday whatsapp', new Date().toISOString());
-  try {
-    const r = await runBirthdayJob();
-    console.log('[node-cron] resultado:', JSON.stringify(r));
-  } catch (e) {
-    console.error('[node-cron] fallo:', e);
-  }
-}, { timezone: 'America/Argentina/Buenos_Aires' });
 
 // Self-ping para que Render free tier no duerma el servicio. Cada 13 min
 // hacemos un GET a /api/health → resetea el contador de inactividad.
@@ -1342,6 +1162,216 @@ app.post('/api/ppi/bonds/batch', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ══════════════════════════════════════════════
+//  GRILLAS DE RENTA FIJA — poller con último valor bueno
+//
+//  El problema que resuelve: antes cada apertura de la grilla disparaba ~2
+//  llamadas a PPI por ticker (MarketData/Current + Bonds/Estimate), de a 5 en
+//  paralelo, y el cliente pintaba lo que volviera. Si una fallaba, esa fila
+//  volvía como {error} y desaparecía de la tabla; al minuto siguiente
+//  reaparecía. Con 25-50 instrumentos por categoría, que las ~100 llamadas
+//  salieran todas bien cada vez era poco probable.
+//
+//  Cómo funciona ahora:
+//    - El server refresca cada categoría por su cuenta, en background.
+//    - Guarda el ÚLTIMO VALOR BUENO de cada ticker. Un refresh que falla no
+//      borra nada: la fila conserva el valor anterior y queda marcada como
+//      desactualizada, con su antigüedad en segundos.
+//    - El cliente pide un snapshot ya armado y lo recibe al instante, sin
+//      esperar a PPI. Las filas son siempre TODAS las de la tabla en la base.
+//
+//  Y para que las llamadas a PPI se rompan menos:
+//    - Bonds/Estimate sólo se vuelve a pedir si el precio se movió más de
+//      0.05% desde el último cálculo. Con el mercado quieto eso baja las
+//      llamadas casi a la mitad (la TIR no cambia si el precio no cambió).
+//    - Las tandas van espaciadas 250ms, en vez de golpear de a 5 sin pausa.
+//    - Un ticker que falla entra en backoff creciente (1, 2, 4... hasta 10
+//      ciclos) en lugar de reintentarse cada minuto para siempre.
+//    - Las categorías se refrescan escalonadas, no las tres juntas.
+// ══════════════════════════════════════════════
+
+const GRID_CATS = {
+  soberanos:    { tabla: 'soberanos',    tipo: 'BONOS', settlement: 'A-48HS' },
+  subsoberanos: { tabla: 'subsoberanos', tipo: 'BONOS', settlement: 'A-48HS' },
+  favorites:    { tabla: 'favorites',    tipo: 'ON',    settlement: 'A-24HS' },
+};
+
+// route → { updatedAt, refreshing, rows: Map<ticker, fila> }
+// fila = { data, okAt, err, errAt, fallos, saltear }
+const gridStore = new Map();
+Object.keys(GRID_CATS).forEach(r => gridStore.set(r, { updatedAt: null, refreshing: false, rows: new Map() }));
+
+const GRID_MAX_FALLOS = 10;       // tope del backoff por ticker
+const GRID_PRECIO_EPS = 0.0005;   // 0.05% — umbral para recalcular la TIR
+
+function pausa(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// Trae precio + estimación de un ticker reusando la TIR anterior si el precio
+// prácticamente no se movió. Devuelve la fila nueva o tira.
+async function fetchFilaGrid(ticker, tipo, settlement, previa) {
+  const md = await ppiFetch(
+    `/api/${PPI_V}/MarketData/Current?${new URLSearchParams({ Ticker: ticker, Type: tipo, Settlement: settlement })}`,
+    { headers: ppiH(), retries: 2 },
+  );
+  const data = md.data || {};
+  const price = Number(data.price);
+  if (!Number.isFinite(price) || price === 0) throw new Error('sin precio');
+
+  // ¿Hace falta recalcular la TIR? Sólo si el precio se movió de verdad.
+  const precioPrevio = Number(previa?.data?.price);
+  const sinCambio = Number.isFinite(precioPrevio) && precioPrevio > 0
+    && Math.abs(price - precioPrevio) / precioPrevio < GRID_PRECIO_EPS
+    && previa?.data?.bond;
+
+  let bond = previa?.data?.bond ?? null;
+  if (!sinCambio) {
+    const be = await ppiFetch(
+      `/api/${PPI_V}/MarketData/Bonds/Estimate?${new URLSearchParams({
+        Ticker: ticker, Date: new Date().toISOString(), QuantityType: 'PAPELES',
+        Quantity: '100', AmountOfMoney: '0', Price: String(price), ExchangeRate: '1',
+        EquityRate: '0', ExchangeRateAmortization: '0', RateAdjustmentAmortization: '0',
+      })}`,
+      { headers: ppiH(), retries: 2 },
+    );
+    const b = Array.isArray(be.data) ? be.data[0] : be.data;
+    // Si la estimación falla pero el precio vino bien, preferimos publicar el
+    // precio nuevo con la TIR vieja antes que descartar la fila entera.
+    bond = b || previa?.data?.bond || null;
+  }
+
+  const opening = Number(data.openingPrice);
+  const prevClose = Number(data.previousClose);
+  return {
+    ticker, price, bond,
+    openingPrice:      Number.isFinite(opening) ? opening : null,
+    previousClose:     Number.isFinite(prevClose) ? prevClose : null,
+    dailyVar:          Number.isFinite(opening) && opening > 0 ? ((price - opening) / opening) * 100 : null,
+    dailyVarPrevClose: Number.isFinite(prevClose) && prevClose > 0 ? ((price - prevClose) / prevClose) * 100 : null,
+    tirReusada:        !!sinCambio,
+  };
+}
+
+async function refreshGrid(route) {
+  const cat = GRID_CATS[route];
+  const store = gridStore.get(route);
+  if (!cat || !store || store.refreshing) return;
+  store.refreshing = true;
+
+  try {
+    await getPPIToken();
+
+    // La lista de instrumentos es la tabla en la base: se muestran TODOS,
+    // tengan o no cotización.
+    let tickers = [];
+    try {
+      const favs = await supa(`/${cat.tabla}?activo=eq.true&order=ticker`);
+      tickers = (Array.isArray(favs) ? favs : []).map(f => f.ticker).filter(Boolean);
+    } catch (e) {
+      console.warn(`[grid ${route}] no pude leer la tabla: ${e.message}`);
+      return; // sin lista no tocamos nada; el snapshot anterior sigue sirviendo
+    }
+
+    // Sacamos del store los que ya no están en la base.
+    for (const t of [...store.rows.keys()]) {
+      if (!tickers.includes(t)) store.rows.delete(t);
+    }
+
+    // Los que están en backoff se saltean en este ciclo.
+    const pendientes = tickers.filter(t => {
+      const f = store.rows.get(t);
+      if (!f || !f.fallos) return true;
+      f.saltear = (f.saltear || 0) - 1;
+      return f.saltear <= 0;
+    });
+
+    let ok = 0, err = 0;
+    for (let i = 0; i < pendientes.length; i += PPI_CONCURRENCY) {
+      const tanda = pendientes.slice(i, i + PPI_CONCURRENCY);
+      const res = await Promise.allSettled(
+        tanda.map(t => fetchFilaGrid(t, cat.tipo, cat.settlement, store.rows.get(t))),
+      );
+      res.forEach((r, j) => {
+        const t = tanda[j];
+        const previa = store.rows.get(t) || {};
+        if (r.status === 'fulfilled') {
+          store.rows.set(t, { data: r.value, okAt: Date.now(), err: null, errAt: null, fallos: 0, saltear: 0 });
+          ok++;
+        } else {
+          const fallos = Math.min((previa.fallos || 0) + 1, GRID_MAX_FALLOS);
+          store.rows.set(t, {
+            ...previa,
+            err: r.reason?.message || 'error',
+            errAt: Date.now(),
+            fallos,
+            saltear: fallos, // backoff: espera tantos ciclos como fallos lleva
+          });
+          err++;
+        }
+      });
+      if (i + PPI_CONCURRENCY < pendientes.length) await pausa(250);
+    }
+
+    store.updatedAt = Date.now();
+    if (err) console.log(`[grid ${route}] ${ok} ok, ${err} con error (conservan el valor anterior), ${tickers.length} en total`);
+  } catch (e) {
+    console.error(`[grid ${route}] refresh falló:`, e.message);
+  } finally {
+    store.refreshing = false;
+  }
+}
+
+// Snapshot para el cliente: SIEMPRE todas las filas, con su antigüedad.
+app.get('/api/ppi/bonds/grid', (req, res) => {
+  const route = String(req.query.route || '');
+  const store = gridStore.get(route);
+  if (!store) return res.status(400).json({ error: 'route inválida' });
+
+  const ahora = Date.now();
+  const rows = [...store.rows.entries()].map(([ticker, f]) => ({
+    ticker,
+    ...(f.data || {}),
+    // `stale` = el último refresh de ESTA fila falló. La fila se sigue
+    // mostrando con el valor viejo; la UI lo marca en vez de esconderla.
+    stale: !!f.err,
+    error: f.err || null,
+    ageSeconds: f.okAt ? Math.round((ahora - f.okAt) / 1000) : null,
+  }));
+
+  res.json({
+    route,
+    updatedAt: store.updatedAt,
+    ageSeconds: store.updatedAt ? Math.round((ahora - store.updatedAt) / 1000) : null,
+    refreshing: store.refreshing,
+    marketOpen: isMarketOpen(),
+    rows,
+  });
+});
+
+// Fuerza un refresh (para testear sin esperar el ciclo).
+app.post('/api/ppi/bonds/grid/refresh', async (req, res) => {
+  const route = String(req.query.route || '');
+  if (!GRID_CATS[route]) return res.status(400).json({ error: 'route inválida' });
+  await refreshGrid(route);
+  const store = gridStore.get(route);
+  res.json({ ok: true, route, filas: store.rows.size, updatedAt: store.updatedAt });
+});
+
+// Ciclo: cada minuto con el mercado abierto; con el mercado cerrado, 1 de
+// cada 5 vueltas (los precios no se mueven y así no gastamos cuota de PPI).
+// Las tres categorías arrancan separadas 20s para no dispararlas juntas.
+const gridVueltas = {};
+Object.keys(GRID_CATS).forEach((route, i) => {
+  gridVueltas[route] = 0;
+  setTimeout(() => {
+    refreshGrid(route);
+    setInterval(() => {
+      gridVueltas[route]++;
+      if (isMarketOpen() || gridVueltas[route] % 5 === 0) refreshGrid(route);
+    }, 60_000);
+  }, 4_000 + i * 20_000);
+});
+
+
 // Clear cache (manual)
 app.post('/api/ppi/cache/clear', (req, res) => { ppiCache.clear(); res.json({ ok: true }); });
 
@@ -1654,6 +1684,17 @@ app.post('/api/ppi/asset/batch', async (req, res) => {
 const TK = ['AL30', 'AL30D', 'AL30C'];
 let authToken = null, primaryWs = null, latestData = {}, resolved = [], symMap = {};
 let allInstruments = [];
+// Plazo con el que quedó suscripto cada ticker FX ('CI', '24hs', ...). Se
+// expone en /api/market/status para que la UI lo muestre y se note al toque
+// si alguna vez dejamos de estar en contado inmediato.
+let fxSettlement = {};
+
+// ── Cauciones en pesos ──
+// En Primary son instrumentos propios: "MERV - XMEV - PESOS - <N>D". Se
+// suscriben por WS igual que los bonos; el precio que publican ES la tasa
+// (TNA %), no un precio en pesos.
+const CAUCION_PLAZOS = [1, 7, 14, 30];
+const caucionKey = (d) => `CAUCION${d}`;
 
 // Settlement aliases: app-facing → Primary symbol suffix
 const SETTLEMENT_MAP = { 'A-24HS': '24hs', 'A-48HS': '48hs', 'INMEDIATA': 'CI', 'CI': 'CI', '24HS': '24hs', '48HS': '48hs' };
@@ -1696,11 +1737,36 @@ async function discover() {
     allInstruments = Array.isArray(d.instruments) ? d.instruments : [];
     const al30 = allInstruments.filter(i => TK.some(k => (i.instrumentId?.symbol || '').includes(k)));
     resolved = []; symMap = {};
+    fxSettlement = {};
     for (const k of TK) {
-      const m = al30.find(i => i.instrumentId.symbol.includes(`- ${k} -`) && i.instrumentId.symbol.includes('CI')) || al30.find(i => i.instrumentId.symbol.includes(`- ${k} -`));
-      if (m) { resolved.push(m.instrumentId); symMap[m.instrumentId.symbol] = k; }
+      // Contado inmediato explícito: el símbolo TERMINA en "- CI". El match
+      // suelto anterior (includes('CI')) podía enganchar cualquier otra cosa,
+      // y sobre todo caía a 24hs sin que nadie se enterara. Si no hay CI
+      // seguimos con lo que haya, pero queda logueado y expuesto en la API.
+      const ci    = al30.find(i => (i.instrumentId.symbol || '').match(new RegExp(`- ${k} - CI$`)));
+      const otro  = al30.find(i => (i.instrumentId.symbol || '').includes(`- ${k} -`));
+      const m = ci || otro;
+      if (!m) { console.warn(`⚠️  ${k}: no se encontró ningún instrumento en Primary`); continue; }
+      if (!ci) console.warn(`⚠️  ${k}: sin contado inmediato en Primary, usando ${m.instrumentId.symbol}`);
+      resolved.push(m.instrumentId);
+      symMap[m.instrumentId.symbol] = k;
+      // Plazo real con el que quedó suscripto, para mostrarlo en la UI.
+      fxSettlement[k] = (m.instrumentId.symbol.split(' - ').pop() || '').trim();
     }
-    console.log(`📋 Instruments: ${allInstruments.length} total, ${resolved.length} AL30-series resolved`);
+    const plazos = TK.map(k => `${k}:${fxSettlement[k] || '?'}`).join(' ');
+
+    // Cauciones en pesos a los plazos de referencia.
+    let cauc = 0;
+    for (const d of CAUCION_PLAZOS) {
+      const sym = `MERV - XMEV - PESOS - ${d}D`;
+      const m = allInstruments.find(i => i.instrumentId?.symbol === sym);
+      if (!m) { console.warn(`⚠️  caución ${d}D: no está en el catálogo de Primary`); continue; }
+      resolved.push(m.instrumentId);
+      symMap[sym] = caucionKey(d);
+      cauc++;
+    }
+
+    console.log(`📋 Instruments: ${allInstruments.length} total, ${resolved.length - cauc} AL30-series (${plazos}), ${cauc} cauciones`);
   } catch (e) { console.error('discover error:', e.message); }
 }
 
@@ -2002,8 +2068,30 @@ function marketStatusPayload(now = new Date()) {
     weekday,
     sessionStart: '10:25',
     sessionEnd:   '17:05',
+    // Plazo real de los tickers FX ({ AL30: 'CI', ... }). La UI lo muestra
+    // para que se vea a simple vista si estamos en contado inmediato.
+    fxSettlement,
   };
 }
+
+// ── Cauciones en pesos ──
+// Devuelve la tasa de la última operación (TNA %) por plazo. Primary publica
+// la tasa en el campo de precio, así que LA es directamente la tasa operada.
+app.get('/api/cauciones', (req, res) => {
+  const items = CAUCION_PLAZOS.map(d => {
+    const k = caucionKey(d);
+    const md = latestData[k]?.marketData || null;
+    const tasa = extractPrice(k, 'LA');
+    return {
+      plazo: d,
+      tasa: Number.isFinite(tasa) ? tasa : null,
+      volumen: md?.TV?.size ?? md?.TV ?? null,
+      updatedAt: latestData[k]?.timestamp || null,
+      suscripto: !!latestData[k],
+    };
+  });
+  res.json({ items, marketOpen: isMarketOpen() });
+});
 
 // ── Persistencia (Supabase / settings) ──
 const SNAPSHOT_KEY = 'fx_market_snapshot';
@@ -2062,6 +2150,8 @@ let lastMarketOpen = false;
 const SNAPSHOT_PERIODIC_MS = 60_000;
 setInterval(() => {
   const open = isMarketOpen();
+  // Fotos de apertura (10:35) y cierre (16:55) para el gráfico de evolución.
+  maybeSnapFx();
   if (open) {
     saveMarketSnapshot('periodic');
   } else if (lastMarketOpen) {
@@ -2157,11 +2247,17 @@ async function saveDailyFxClose(reason = 'manual') {
     // Los seguimos usando *transitoriamente* para computar mep_compra/venta y
     // ccl_compra/venta — buy-side al offer, sell-side al bid — pero sólo el
     // resultado calculado (y los CL) van a parar a la fila.
+    // Los *_close los escribe la foto de las 16:55 con el último operado.
+    // Acá sólo los completamos si esa foto no salió (server caído a esa hora,
+    // o ningún trade en los tres bonos) — así la fila nunca queda sin cierre.
+    const cierreYaTomado = lastFxCloseSnapDate === today;
     const row = {
       date: today,
-      al30_close:  al30c,
-      al30d_close: al30dc,
-      al30c_close: al30cc,
+      ...(cierreYaTomado ? {} : {
+        al30_close:  al30c,
+        al30d_close: al30dc,
+        al30c_close: al30cc,
+      }),
       mep_compra:   al30o  / al30db,
       mep_venta:    al30b  / al30do,
       ccl_compra:   al30o  / al30cb,
@@ -2187,6 +2283,82 @@ async function saveDailyFxClose(reason = 'manual') {
 }
 
 // Wrapper idempotente: 1 save por día calendario AR, exigiendo data fresca.
+// ── Fotos de apertura y cierre (último operado) ──
+//
+// El gráfico de evolución no usa el cierre de la rueda ni un mid sintético:
+// toma dos fotos del ÚLTIMO OPERADO, a 10 minutos de la apertura y a 10
+// minutos del cierre. En esas dos ventanas el book ya está armado y el
+// precio es representativo; en los bordes de la rueda no.
+const FX_OPEN_SNAP_MIN  = 10 * 60 + 35; // 10:35 (abre 10:25)
+const FX_CLOSE_SNAP_MIN = 16 * 60 + 55; // 16:55 (cierra 17:05)
+
+let lastFxOpenSnapDate  = null;
+let lastFxCloseSnapDate = null;
+
+// Guarda en la fila del día las columnas que se le pasen, sin pisar el resto.
+async function upsertFxRow(today, fields) {
+  const existing = await supa(`/daily_fx_closes?date=eq.${today}`);
+  if (Array.isArray(existing) && existing.length > 0) {
+    await supa(`/daily_fx_closes?date=eq.${today}`, { method: 'PATCH', body: fields });
+  } else {
+    await supa('/daily_fx_closes', { method: 'POST', body: { date: today, ...fields } });
+  }
+}
+
+// `punta` ∈ 'open' | 'close'. Lee LA (último operado) de los tres bonos y
+// escribe al30_open/al30d_open/al30c_open o los *_close correspondientes.
+async function snapFxOperado(punta) {
+  const today = todayKeyAR();
+  const la = {
+    al30:  extractPrice('AL30',  'LA'),
+    al30d: extractPrice('AL30D', 'LA'),
+    al30c: extractPrice('AL30C', 'LA'),
+  };
+  // Si algún bono no operó todavía, no escribimos una foto a medias: se
+  // reintenta en el próximo tick mientras siga abierta la ventana.
+  if (!la.al30 || !la.al30d || !la.al30c) {
+    console.log(`⏳ FX ${punta}: sin último operado en los 3 bonos todavía`);
+    return { ok: false, reason: 'no_trades' };
+  }
+  const sufijo = punta === 'open' ? '_open' : '_close';
+  try {
+    await upsertFxRow(today, {
+      [`al30${sufijo}`]:  la.al30,
+      [`al30d${sufijo}`]: la.al30d,
+      [`al30c${sufijo}`]: la.al30c,
+    });
+    if (punta === 'open') lastFxOpenSnapDate = today; else lastFxCloseSnapDate = today;
+    console.log(`📸 FX ${punta} ${today}: AL30 ${la.al30} · AL30D ${la.al30d} · AL30C ${la.al30c} (MEP ${(la.al30 / la.al30d).toFixed(2)})`);
+    return { ok: true, date: today, ...la };
+  } catch (e) {
+    console.error(`❌ FX ${punta} save:`, e.message);
+    return { ok: false, reason: 'error', error: e.message };
+  }
+}
+
+// Se llama desde el tick de 60s. La ventana es de 10 minutos desde la hora
+// objetivo: si el server estaba reiniciando justo a las 10:35, igual alcanza
+// a tomar la foto. Una vez tomada, el flag de fecha no deja repetirla.
+function maybeSnapFx() {
+  const { weekday, hour, minute } = getBuenosAiresParts();
+  if (!['Mon','Tue','Wed','Thu','Fri'].includes(weekday)) return;
+  const m = hour * 60 + minute;
+  const today = todayKeyAR();
+
+  if (lastFxOpenSnapDate !== today && m >= FX_OPEN_SNAP_MIN && m < FX_OPEN_SNAP_MIN + 10) {
+    snapFxOperado('open');
+  }
+  if (lastFxCloseSnapDate !== today && m >= FX_CLOSE_SNAP_MIN && m < FX_CLOSE_SNAP_MIN + 10) {
+    snapFxOperado('close');
+  }
+}
+
+// Disparo manual, para testear sin esperar a la hora.
+app.post('/api/fx/snap/:punta', async (req, res) => {
+  const punta = req.params.punta === 'open' ? 'open' : 'close';
+  res.json(await snapFxOperado(punta));
+});
+
 // `force` saltea el guard de `lastFxSaveDate` (lo usa el endpoint manual).
 async function maybeSaveFxClose(reason, { force = false } = {}) {
   const today = todayKeyAR();
