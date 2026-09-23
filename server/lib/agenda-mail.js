@@ -224,6 +224,21 @@ export function mailConfigurado() {
   return !!(process.env.GMAIL_USER && process.env.GMAIL_APP_PASSWORD);
 }
 
+// Prueba la conexión y el login contra Gmail sin mandar ningún mail. Sirve
+// para distinguir un problema de red (puerto bloqueado, IPv6 sin ruta) de uno
+// de credenciales, que dan errores muy distintos y se confunden fácil.
+export async function verificarSmtp() {
+  const t = getTransporter();
+  if (!t) return { ok: false, motivo: 'sin_credenciales' };
+  const t0 = Date.now();
+  try {
+    await t.verify();
+    return { ok: true, ms: Date.now() - t0 };
+  } catch (e) {
+    return { ok: false, error: e.message, code: e.code || null, ms: Date.now() - t0 };
+  }
+}
+
 function getTransporter() {
   if (transporter) return transporter;
   if (!mailConfigurado()) return null;
@@ -231,6 +246,16 @@ function getTransporter() {
     host: 'smtp.gmail.com',
     port: 465,
     secure: true,
+    // IPv4 forzado. El contenedor de Render no tiene ruta IPv6: Node resolvía
+    // smtp.gmail.com a una dirección v6 y la conexión moría con ENETUNREACH,
+    // o quedaba colgada hasta el timeout. En local no se ve porque la máquina
+    // sí tiene IPv6 y conecta por ahí.
+    family: 4,
+    // Sin estos timeouts, un puerto bloqueado deja el request colgado minutos.
+    // Preferimos fallar rápido y que quede en el log.
+    connectionTimeout: 15_000,
+    greetingTimeout:   10_000,
+    socketTimeout:     20_000,
     auth: {
       user: process.env.GMAIL_USER,
       pass: String(process.env.GMAIL_APP_PASSWORD).replace(/\s+/g, ''), // Google las muestra con espacios

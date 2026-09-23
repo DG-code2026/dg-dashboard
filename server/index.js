@@ -8,7 +8,7 @@ import Parser from 'rss-parser';
 import { httpJson, singleflight, HttpError } from './lib/http.js';
 import {
   ymdEnAR, sumarDias, lunesDeLaSemana, fmtFechaLarga,
-  construirICS, construirHtml, enviarMail, mailConfigurado,
+  construirICS, construirHtml, enviarMail, mailConfigurado, verificarSmtp,
 } from './lib/agenda-mail.js';
 
 const app = express();
@@ -759,6 +759,12 @@ async function armarSemanal(hoyYmd) {
     ics: construirICS(registros, nombre),
   };
 }
+
+// Diagnóstico de la conexión SMTP, sin enviar nada. Distingue un problema de
+// red de uno de credenciales.
+app.get('/api/agenda/smtp-check', async (req, res) => {
+  res.json(await verificarSmtp());
+});
 
 // Descarga .ics de un rango. Lo usan los botones "Agregar todo al calendario"
 // de los mails y el de la propia sección Agenda.
