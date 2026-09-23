@@ -8,7 +8,7 @@ import Parser from 'rss-parser';
 import { httpJson, singleflight, HttpError } from './lib/http.js';
 import {
   ymdEnAR, sumarDias, lunesDeLaSemana, fmtFechaLarga,
-  construirICS, construirHtml, enviarMail, mailConfigurado, verificarSmtp, probarPuertosSmtp,
+  construirICS, construirHtml, enviarMail, mailConfigurado, verificarSmtp, transporteMail,
 } from './lib/agenda-mail.js';
 
 const app = express();
@@ -766,7 +766,10 @@ app.get('/api/agenda/smtp-check', async (req, res) => {
   // ?puerto=587 prueba uno puntual. Los tres juntos hacen timeout en el
   // proxy de Render, así que se prueban de a uno.
   const p = Number(req.query.puerto);
-  res.json(await verificarSmtp(Number.isFinite(p) && p > 0 ? p : undefined));
+  res.json({
+    transporte: transporteMail(),
+    smtp: await verificarSmtp(Number.isFinite(p) && p > 0 ? p : undefined),
+  });
 });
 
 // Descarga .ics de un rango. Lo usan los botones "Agregar todo al calendario"
@@ -802,7 +805,7 @@ app.get('/api/agenda/preview', async (req, res) => {
 app.post('/api/agenda/enviar', async (req, res) => {
   try {
     if (!mailConfigurado()) {
-      return res.status(400).json({ error: 'falta configurar GMAIL_USER y GMAIL_APP_PASSWORD en el .env' });
+      return res.status(400).json({ error: 'mail no configurado: falta RESEND_API_KEY (o GMAIL_USER + GMAIL_APP_PASSWORD)' });
     }
     const tipo = req.query.tipo === 'semanal' ? 'semanal' : 'diario';
     const hoy = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.hoy)) ? String(req.query.hoy) : ymdEnAR();

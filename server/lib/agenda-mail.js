@@ -220,8 +220,55 @@ export function construirHtml({ titulo, bajada, registros, nombrePorPersona, eti
 // generada en la cuenta de Google — nunca la contraseña real.
 let transporter = null;
 
+// ── Elección de transporte ──
+//
+// Resend entrega por HTTPS (443); Gmail, por SMTP (465/587). Render bloquea
+// TODA salida SMTP — los tres puertos dan ETIMEDOUT desde el contenedor — así
+// que en producción el único camino es HTTP. El SMTP se conserva porque sí
+// funciona desde una máquina local y sirve para probar sin depender de nada.
+//
+// Si hay RESEND_API_KEY se usa Resend; si no, SMTP.
+export function transporteMail() {
+  if (process.env.RESEND_API_KEY) return 'resend';
+  if (process.env.GMAIL_USER && process.env.GMAIL_APP_PASSWORD) return 'smtp';
+  return null;
+}
+
 export function mailConfigurado() {
-  return !!(process.env.GMAIL_USER && process.env.GMAIL_APP_PASSWORD);
+  return transporteMail() !== null;
+}
+
+// Dirección remitente. En Resend tiene que pertenecer a un dominio verificado.
+function remitenteMail() {
+  return process.env.MAIL_FROM || process.env.GMAIL_USER || 'agenda@delfinogavina.com.ar';
+}
+
+// ── Envío por Resend (HTTPS) ──
+async function enviarPorResend({ para, asunto, html, adjuntoIcs }) {
+  const r = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${process.env.RESEND_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      from: `D&G Agenda <${remitenteMail()}>`,
+      to: [para],
+      subject: asunto,
+      html,
+      ...(adjuntoIcs ? {
+        attachments: [{
+          filename: 'agenda.ics',
+          content: Buffer.from(adjuntoIcs, 'utf8').toString('base64'),
+        }],
+      } : {}),
+    }),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    throw new Error(data?.message || data?.error?.message || `Resend HTTP ${r.status}`);
+  }
+  return data?.id || null;
 }
 
 // Prueba la conexión y el login contra Gmail sin mandar ningún mail. Sirve
@@ -296,36 +343,36 @@ function getTransporter() {
 //
 // Devuelve el detalle por destinatario: un fallo en uno no cancela el resto.
 export async function enviarMail({ para, asunto, html, adjuntoIcs }) {
-  const t = getTransporter();
-  if (!t) throw new Error('SMTP no configurado (faltan GMAIL_USER / GMAIL_APP_PASSWORD)');
+  const transporte = transporteMail();
+  if (!transporte) throw new Error('mail no configurado (falta RESEND_API_KEY, o GMAIL_USER + GMAIL_APP_PASSWORD)');
   if (!para?.length) throw new Error('sin destinatarios');
 
-  // La cuenta que autentica y la dirección que figura como remitente pueden
-  // ser distintas. Sirve cuando info@ es un alias o un grupo (no tiene login
-  // propio, así que tampoco contraseña de aplicación): se autentica con una
-  // casilla real y se manda "desde" info@. Para que Gmail lo acepte, esa
-  // dirección tiene que estar dada de alta como "Enviar como" en la cuenta.
-  const remitente = process.env.MAIL_FROM || process.env.GMAIL_USER;
-
-  const adjuntos = adjuntoIcs
+  const remitente = remitenteMail();
+  const adjuntosSmtp = adjuntoIcs
     ? [{ filename: 'agenda.ics', content: adjuntoIcs, contentType: 'text/calendar; charset=utf-8' }]
     : [];
 
   const resultados = [];
   for (const destinatario of para) {
     try {
-      const info = await t.sendMail({
-        from: `"D&G Agenda" <${remitente}>`,
-        replyTo: remitente,
-        to: destinatario,
-        subject: asunto,
-        html,
-        attachments: adjuntos,
-      });
-      resultados.push({ para: destinatario, ok: true, messageId: info.messageId });
+      let id;
+      if (transporte === 'resend') {
+        id = await enviarPorResend({ para: destinatario, asunto, html, adjuntoIcs });
+      } else {
+        const info = await getTransporter().sendMail({
+          from: `"D&G Agenda" <${remitente}>`,
+          replyTo: remitente,
+          to: destinatario,
+          subject: asunto,
+          html,
+          attachments: adjuntosSmtp,
+        });
+        id = info.messageId;
+      }
+      resultados.push({ para: destinatario, ok: true, id, via: transporte });
     } catch (e) {
-      console.error(`[agenda] falló el envío a ${destinatario}:`, e.message);
-      resultados.push({ para: destinatario, ok: false, error: e.message });
+      console.error(`[agenda] falló el envío a ${destinatario} (${transporte}):`, e.message);
+      resultados.push({ para: destinatario, ok: false, error: e.message, via: transporte });
     }
   }
   return resultados;
