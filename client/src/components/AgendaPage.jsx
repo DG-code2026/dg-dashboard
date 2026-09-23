@@ -1,14 +1,19 @@
 // ─────────────────────────────────────────────────────────────────────────────
-//  VACACIONES — calendario de ausencias del equipo
+//  AGENDA — ausencias del equipo + eventos de la firma
 //
 //  Dos vistas sobre los mismos datos:
-//    - Timeline: una franja por persona, barras de colores sobre los días.
-//      En vista MES la grilla son los días del mes; en vista AÑO, los 12 meses.
-//      Es donde se ven los solapamientos de un vistazo.
+//    - Timeline: una franja por participante, barras de colores sobre una
+//      cuadrícula. En vista MES las columnas son los días del mes; en vista
+//      AÑO, los 12 meses. Es donde se ven los solapamientos de un vistazo.
 //    - Tabla: el detalle de cada registro, editable y borrable.
 //
+//  D&G es un participante más, pero representa a la firma: sus registros son
+//  eventos (reuniones, licitaciones, cierres), no ausencias de nadie.
+//
 //  Los datos viven en Supabase (`vacaciones_personas` + `vacaciones`) y se
-//  acceden vía el server Express bajo `/api/db/vacaciones*`.
+//  acceden vía el server Express bajo `/api/db/vacaciones*`. Los nombres de
+//  tabla y endpoint quedaron de cuando la sección se llamaba VACACIONES;
+//  renombrarlos no aportaba nada y rompía la API en uso.
 //
 //  El selector de fechas es el MiniCalendar que ya usa el modal "Fuera de
 //  oficina" — mismo comportamiento de rango (click 1 = inicio, click 2 = fin).
@@ -26,6 +31,7 @@ const API = import.meta.env.VITE_API_URL || 'http://localhost:3001';
 // Tipos de ausencia. El `key` es lo que viaja a la base (constraint CHECK en
 // la tabla), el resto es presentación.
 const TIPOS = [
+  { key: 'evento',      label: 'Evento',        abbr: 'EVT', color: '#2dd4bf' },
   { key: 'vacaciones',  label: 'Vacaciones',    abbr: 'VAC', color: '#22c55e' },
   { key: 'licencia',    label: 'Licencia',      abbr: 'LIC', color: '#ef4444' },
   { key: 'estudio',     label: 'Estudio',       abbr: 'EST', color: '#3b82f6' },
@@ -74,7 +80,7 @@ function fmtFecha(iso) {
 // Solapamiento entre dos rangos cerrados.
 const solapan = (aDesde, aHasta, bDesde, bHasta) => aDesde <= bHasta && bDesde <= aHasta;
 
-export default function VacacionesPage() {
+export default function AgendaPage() {
   const { profile } = useAuth();
 
   const [personas, setPersonas] = useState([]);
@@ -104,6 +110,9 @@ export default function VacacionesPage() {
   const [fmDesde, setFmDesde]     = useState('');
   const [fmHasta, setFmHasta]     = useState('');
   const [fmDesc, setFmDesc]       = useState('');
+  // Horas: sólo se usan en eventos. Vacías = registro de día completo.
+  const [fmHoraDesde, setFmHoraDesde] = useState('');
+  const [fmHoraHasta, setFmHoraHasta] = useState('');
   const [fmErr, setFmErr]         = useState('');
   const [saving, setSaving]       = useState(false);
 
@@ -202,6 +211,10 @@ export default function VacacionesPage() {
       for (let j = i + 1; j < registros.length; j++) {
         const a = registros[i], b = registros[j];
         if (a.persona_id === b.persona_id) continue;
+        // Los eventos de la firma no son un solapamiento: que un evento caiga
+        // durante las vacaciones de alguien es normal. Lo que importa avisar
+        // es cuándo hay dos personas ausentes a la vez (riesgo de cobertura).
+        if (a.tipo === 'evento' || b.tipo === 'evento') continue;
         if (!solapan(a.desde, a.hasta, b.desde, b.hasta)) continue;
         const pa = personaPorId.get(a.persona_id), pb = personaPorId.get(b.persona_id);
         if (pa && pb) out.push({ a: pa.etiqueta, b: pb.etiqueta });
@@ -244,6 +257,7 @@ export default function VacacionesPage() {
     setFmPersona(personas[0]?.id || '');
     setFmTipo('vacaciones');
     setFmDesde(''); setFmHasta('');
+    setFmHoraDesde(''); setFmHoraHasta('');
     setFmDesc(''); setFmErr('');
     setShowForm(true);
   };
@@ -253,6 +267,8 @@ export default function VacacionesPage() {
     setFmPersona(r.persona_id);
     setFmTipo(r.tipo);
     setFmDesde(r.desde); setFmHasta(r.hasta);
+    setFmHoraDesde((r.hora_desde || '').slice(0, 5));
+    setFmHoraHasta((r.hora_hasta || '').slice(0, 5));
     setFmDesc(r.descripcion || ''); setFmErr('');
     setShowForm(true);
   };
@@ -267,6 +283,8 @@ export default function VacacionesPage() {
       const body = {
         persona_id: fmPersona, tipo: fmTipo,
         desde: fmDesde, hasta: fmHasta,
+        hora_desde: fmHoraDesde || null,
+        hora_hasta: fmHoraHasta || null,
         descripcion: fmDesc.trim() || null,
         creado_por: profile?.email || null,
       };
@@ -338,6 +356,18 @@ export default function VacacionesPage() {
     }
   };
 
+  // D&G no se toma vacaciones: lo que carga la firma son eventos. Al elegirla
+  // en el form, el tipo salta a "evento"; y al elegir a una persona viniendo
+  // de D&G, vuelve a "vacaciones". Sólo pisa el tipo cuando el cambio de
+  // persona cruza esa frontera, así no le deshace la elección al usuario.
+  const esFirma = (id) => personaPorId.get(id)?.etiqueta === 'DG';
+  useEffect(() => {
+    if (!fmPersona) return;
+    if (esFirma(fmPersona) && fmTipo !== 'evento') setFmTipo('evento');
+    if (!esFirma(fmPersona) && fmTipo === 'evento') setFmTipo('vacaciones');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fmPersona, personaPorId]);
+
   // La confirmación se desarma sola a los 6s, para no dejar un botón rojo
   // "armado" si el usuario se distrae y vuelve más tarde.
   useEffect(() => {
@@ -376,6 +406,15 @@ export default function VacacionesPage() {
         </div>
 
         <div style={S.navGroup}>
+          {/* Baja lo que se está viendo como .ics. Google Calendar, iPhone y
+              Outlook lo importan igual, así que sirve para cualquiera. */}
+          <a
+            href={`${API}/api/agenda/ics?desde=${ventana.from}&hasta=${ventana.to}`}
+            style={S.icsBtn}
+            title={`Descargar ${vista === 'anio' ? 'el año' : 'el mes'} como archivo de calendario`}
+          >
+            ↓ AL CALENDARIO
+          </a>
           <div style={S.toggle}>
             {['mes', 'anio'].map(v => (
               <button
@@ -388,7 +427,7 @@ export default function VacacionesPage() {
               </button>
             ))}
           </div>
-          <button type="button" style={S.primaryBtn} onClick={abrirAlta}>+ CARGAR AUSENCIA</button>
+          <button type="button" style={S.primaryBtn} onClick={abrirAlta}>+ CARGAR EN AGENDA</button>
         </div>
       </div>
 
@@ -398,7 +437,7 @@ export default function VacacionesPage() {
       <div style={S.hoyBanner}>
         <span style={S.hoyLabel}>HOY</span>
         {ausentesHoy.length === 0
-          ? <span style={S.hoyVacio}>Todo el equipo disponible</span>
+          ? <span style={S.hoyVacio}>Sin ausencias ni eventos hoy</span>
           : ausentesHoy.map(({ reg, persona }) => (
               <span key={reg.id} style={{ ...S.chip, borderColor: persona.color, color: persona.color }}>
                 {persona.etiqueta}
@@ -444,7 +483,7 @@ export default function VacacionesPage() {
       {showForm && (
         <div style={S.formCard}>
           <div style={S.formHead}>
-            <span style={S.formTitulo}>{editId ? 'EDITAR AUSENCIA' : 'NUEVA AUSENCIA'}</span>
+            <span style={S.formTitulo}>{editId ? 'EDITAR REGISTRO' : 'NUEVO REGISTRO'}</span>
             <button type="button" style={S.closeBtn} onClick={() => setShowForm(false)}>✕</button>
           </div>
 
@@ -514,10 +553,48 @@ export default function VacacionesPage() {
                 ))}
               </div>
 
+              {/* Horario: sólo tiene sentido en eventos. Una licencia o unas
+                  vacaciones son de día completo; pedir hora ahí sería ruido. */}
+              {fmTipo === 'evento' && (
+                <>
+                  <label style={S.label}>HORARIO <span style={S.labelOpt}>opcional</span></label>
+                  <div style={S.rowGap}>
+                    <input
+                      type="time"
+                      style={{ ...S.input, width: 120 }}
+                      value={fmHoraDesde}
+                      onChange={e => {
+                        setFmHoraDesde(e.target.value);
+                        if (!e.target.value) setFmHoraHasta('');
+                      }}
+                    />
+                    <span style={S.labelInline}>A</span>
+                    <input
+                      type="time"
+                      style={{ ...S.input, width: 120 }}
+                      value={fmHoraHasta}
+                      disabled={!fmHoraDesde}
+                      onChange={e => setFmHoraHasta(e.target.value)}
+                    />
+                    {fmHoraDesde && (
+                      <button
+                        type="button"
+                        style={S.ghostBtn}
+                        onClick={() => { setFmHoraDesde(''); setFmHoraHasta(''); }}
+                      >
+                        TODO EL DÍA
+                      </button>
+                    )}
+                  </div>
+                </>
+              )}
+
               <label style={S.label}>DESCRIPCIÓN</label>
               <input
                 style={S.input}
-                placeholder="Opcional — ej. viaje a Bariloche, curso CFA"
+                placeholder={fmTipo === 'evento'
+                  ? 'Ej. Reunión con Pershing, cierre de trimestre'
+                  : 'Opcional — ej. viaje a Bariloche, curso CFA'}
                 value={fmDesc}
                 onChange={e => setFmDesc(e.target.value)}
               />
@@ -605,8 +682,14 @@ export default function VacacionesPage() {
                     <span style={S.personaNombre}>{p?.nombre || ''}</span>
                   </td>
                   <td style={S.td}><span style={{ ...S.tipoTag, background: `${t.color}1f`, color: t.color }}>{t.label}</span></td>
-                  <td style={S.tdMono}>{fmtFecha(r.desde)}</td>
-                  <td style={S.tdMono}>{fmtFecha(r.hasta)}</td>
+                  <td style={S.tdMono}>
+                    {fmtFecha(r.desde)}
+                    {r.hora_desde && <span style={S.hora}>{String(r.hora_desde).slice(0, 5)}</span>}
+                  </td>
+                  <td style={S.tdMono}>
+                    {fmtFecha(r.hasta)}
+                    {r.hora_hasta && <span style={S.hora}>{String(r.hora_hasta).slice(0, 5)}</span>}
+                  </td>
                   <td style={{ ...S.tdMono, textAlign: 'right' }}>
                     {diasHabiles(r.desde, r.hasta, feriados)}
                     <span style={S.diasCorridos}>/{diasCorridos(r.desde, r.hasta)}</span>
@@ -754,12 +837,28 @@ function Timeline({ vista, anchor, ventana, personas, registros, feriados, total
         const barras = barrasPorPersona.get(p.id) || [];
         const total = totalPorPersona.get(p.id) || 0;
         return (
-          <div key={p.id} style={S.tlRow}>
+          <div key={p.id} style={{ ...S.tlRow, ...S.tlRowLinea }}>
             <div style={S.tlLabelCol}>
               <span style={{ ...S.tlTag, borderColor: p.color, color: p.color }}>{p.etiqueta}</span>
               {total > 0 && <span style={S.tlTotal}>{total}d</span>}
             </div>
             <div style={S.tlGrid}>
+              {/* Cuadrícula: una línea vertical por columna (día en vista mes,
+                  mes en vista año). Da la lectura de grilla y deja contar los
+                  días de un vistazo sin tener que seguir la barra. */}
+              {columnas.map((c, i) => (
+                <div
+                  key={`gr${i}`}
+                  style={{
+                    ...S.tlLineaCol,
+                    left: `${(c.offset / totalDias) * 100}%`,
+                    // En vista año la separación entre meses se marca más
+                    // fuerte, porque son pocas columnas y bien definidas.
+                    borderLeftColor: vista === 'anio' ? 'var(--border)' : 'rgba(127,127,127,0.18)',
+                  }}
+                />
+              ))}
+
               {/* Fondo: fines de semana y feriados sombreados (sólo vista mes) */}
               {vista === 'mes' && columnas.map((c, i) => (
                 (c.finde || c.feriado) ? (
@@ -791,14 +890,21 @@ function Timeline({ vista, anchor, ventana, personas, registros, feriados, total
                       ...S.tlBar,
                       left: `${b.left}%`,
                       width: `${b.width}%`,
-                      background: `${t.color}2e`,
+                      // Sin sigla, el color es lo único que identifica al
+                      // evento: en vista año la barra va bien sólida para que
+                      // se lea aunque mida pocos píxeles de ancho.
+                      background: vista === 'anio' ? t.color : `${t.color}2e`,
                       borderColor: t.color,
+                      minWidth: vista === 'anio' ? 3 : undefined,
                       borderLeftStyle: b.cortadaIzq ? 'dashed' : 'solid',
                       borderRightStyle: b.cortadaDer ? 'dashed' : 'solid',
                       color: t.color,
                     }}
                   >
-                    <span style={S.tlBarLabel}>{t.abbr}</span>
+                    {/* En vista año las barras son angostas y la sigla queda
+                        cortada a la mitad ("EST" → "ES"). Ahí va sólo el
+                        color: el tipo se lee en la leyenda y en el tooltip. */}
+                    {vista === 'mes' && <span style={S.tlBarLabel}>{t.abbr}</span>}
                   </button>
                 );
               })}
@@ -887,6 +993,8 @@ const S = {
     padding: 24, textAlign: 'center', fontFamily: MONO, fontSize: 11, color: 'var(--text-dim)',
   },
   tlRow: { display: 'flex', alignItems: 'center', gap: 10, minHeight: 26 },
+  // Separador horizontal entre personas: cierra la cuadrícula en el otro eje.
+  tlRowLinea: { borderTop: '1px solid var(--border)' },
   tlLabelCol: { width: 74, flexShrink: 0, display: 'flex', alignItems: 'center', gap: 6 },
   tlTag: {
     border: '1px solid', borderRadius: 3, padding: '2px 6px',
@@ -899,6 +1007,8 @@ const S = {
     fontFamily: MONO, fontSize: 8.5, letterSpacing: 0.3, lineHeight: '22px',
   },
   tlBgCell: { position: 'absolute', top: 0, bottom: 0, borderRadius: 2 },
+  // Línea vertical de la cuadrícula. Va detrás de las barras (zIndex 0).
+  tlLineaCol: { position: 'absolute', top: -3, bottom: -3, width: 0, borderLeft: '1px solid', zIndex: 0 },
   tlHoy: { position: 'absolute', top: -2, bottom: -2, width: 1, background: 'var(--neon)', opacity: 0.75, zIndex: 3 },
   tlBar: {
     position: 'absolute', top: 2, height: 18,
@@ -926,6 +1036,13 @@ const S = {
   formCol: { flex: '1 1 300px', display: 'flex', flexDirection: 'column', gap: 8, minWidth: 280 },
   label: { fontFamily: MONO, fontSize: 9, fontWeight: 700, letterSpacing: 1.8, color: 'var(--text-dim)', marginTop: 4 },
   labelInline: { fontFamily: MONO, fontSize: 9, fontWeight: 700, letterSpacing: 1.5, color: 'var(--text-dim)' },
+  labelOpt: { fontWeight: 400, letterSpacing: 0.5, opacity: 0.6, textTransform: 'none' },
+  icsBtn: {
+    display: 'inline-flex', alignItems: 'center', gap: 6,
+    background: 'transparent', border: '1px solid var(--border)', borderRadius: 4,
+    color: 'var(--text-dim)', fontFamily: MONO, fontSize: 9, fontWeight: 700,
+    letterSpacing: 1.2, padding: '6px 11px', cursor: 'pointer', textDecoration: 'none',
+  },
   rowGap: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
   select: {
     flex: 1, background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 4,
@@ -972,6 +1089,7 @@ const S = {
   tdMono: { padding: '8px 11px', fontFamily: MONO, fontSize: 11, color: 'var(--text)', whiteSpace: 'nowrap' },
   tdDesc: { padding: '8px 11px', fontSize: 11.5, color: 'var(--text-dim)', maxWidth: 260 },
   diasCorridos: { color: 'var(--text-dim)', opacity: 0.6, fontSize: 9.5 },
+  hora: { marginLeft: 6, fontSize: 9.5, color: 'var(--neon)', opacity: 0.9 },
   dim: { opacity: 0.4 },
   empty: { padding: 20, textAlign: 'center', fontFamily: MONO, fontSize: 11, color: 'var(--text-dim)' },
   personaTag: {

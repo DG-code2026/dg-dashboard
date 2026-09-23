@@ -34,7 +34,7 @@ const CartasPage            = lazy(() => import('./components/CartasPage'));
 const FondosPershing        = lazy(() => import('./components/FondosPershing'));
 const CalculadoraRotaciones = lazy(() => import('./components/CalculadoraRotaciones'));
 const AvisosSaldoPage       = lazy(() => import('./components/AvisosSaldoPage'));
-const VacacionesPage        = lazy(() => import('./components/VacacionesPage'));
+const AgendaPage            = lazy(() => import('./components/AgendaPage'));
 
 const TICKERS = ['AL30', 'AL30D', 'AL30C'];
 
@@ -52,7 +52,7 @@ const TABS = [
   { path: '/propuestas',   label: 'PROPUESTAS',                group: 'Gestión' },
   { path: '/cartas',       label: 'CARTAS',                    group: 'Gestión' },
   { path: '/avisos-saldo', label: 'AVISO DE SALDO',            group: 'Gestión' },
-  { path: '/vacaciones',   label: 'VACACIONES',                group: 'Gestión' },
+  { path: '/agenda',       label: 'AGENDA',                    group: 'Gestión' },
 ];
 
 export default function App() {
@@ -76,7 +76,9 @@ export default function App() {
               <Route path="cartas"       element={<CartasRoute />} />
               <Route path="pershing"     element={<PershingRoute />} />
               <Route path="avisos-saldo" element={<AvisosRoute />} />
-              <Route path="vacaciones"   element={<VacacionesRoute />} />
+              <Route path="agenda"       element={<AgendaRoute />} />
+              {/* La sección se llamaba "vacaciones"; los links viejos siguen andando. */}
+              <Route path="vacaciones"   element={<Navigate to="/agenda" replace />} />
               <Route path="*"            element={<NotFoundRoute />} />
             </Route>
           </Routes>
@@ -370,8 +372,8 @@ function PershingRoute() {
 function AvisosRoute() {
   return <section><SH title="AVISO DE SALDO" /><AvisosSaldoPage /></section>;
 }
-function VacacionesRoute() {
-  return <section><SH title="VACACIONES" /><VacacionesPage /></section>;
+function AgendaRoute() {
+  return <section><SH title="AGENDA" /><AgendaPage /></section>;
 }
 
 // Mini-menu con email del user logueado + botón cerrar sesión.

@@ -33,11 +33,15 @@ function usePersonas() {
       .then(r => r.ok ? r.json() : [])
       .then(data => {
         if (!vivo) return;
-        setPersonas((Array.isArray(data) ? data : []).map(p => ({
-          key: p.etiqueta,
-          name: p.nombre,
-          phone: p.telefono || '',
-        })));
+        setPersonas((Array.isArray(data) ? data : [])
+          // D&G es la firma, no una persona: aparece en la agenda para cargar
+          // eventos, pero no puede "estar fuera de oficina".
+          .filter(p => p.etiqueta !== 'DG')
+          .map(p => ({
+            key: p.etiqueta,
+            name: p.nombre,
+            phone: p.telefono || '',
+          })));
       })
       .catch(() => { if (vivo) setPersonas([]); });
     return () => { vivo = false; };

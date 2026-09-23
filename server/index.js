@@ -6,6 +6,10 @@ import http from 'http';
 import cron from 'node-cron';
 import Parser from 'rss-parser';
 import { httpJson, singleflight, HttpError } from './lib/http.js';
+import {
+  ymdEnAR, sumarDias, lunesDeLaSemana, fmtFechaLarga,
+  construirICS, construirHtml, enviarMail, mailConfigurado,
+} from './lib/agenda-mail.js';
 
 const app = express();
 app.use(cors());
@@ -477,8 +481,22 @@ app.delete('/api/db/fondos-pershing/:isin', async (req, res) => {
 //  con el email del que cargó, sólo como rastro de auditoría.
 // ══════════════════════════════════════════════
 
-const VAC_TIPOS = ['vacaciones', 'licencia', 'estudio', 'home_office', 'personal'];
+// 'evento' es lo que carga D&G (la firma): reuniones, licitaciones, cierres.
+// El resto son ausencias de una persona. Tiene que coincidir con el CHECK de
+// la tabla `vacaciones`.
+const VAC_TIPOS = ['vacaciones', 'licencia', 'estudio', 'home_office', 'personal', 'evento'];
 const VAC_ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+// Normaliza una hora a "HH:MM". Devuelve null para vacío o formato inválido,
+// así el campo queda en null (= día completo) en lugar de romper el insert.
+function normHora(v) {
+  const s = String(v ?? '').trim();
+  const m = s.match(/^(\d{1,2}):(\d{2})/);
+  if (!m) return null;
+  const h = Number(m[1]), min = Number(m[2]);
+  if (h > 23 || min > 59) return null;
+  return `${String(h).padStart(2, '0')}:${m[2]}`;
+}
 
 // ── Personas ──
 
@@ -589,6 +607,10 @@ app.post('/api/db/vacaciones', async (req, res) => {
       method: 'POST',
       body: {
         persona_id, desde, hasta, tipo,
+        // Las horas son opcionales: sólo los eventos las usan, las ausencias
+        // son de día completo. Si viene fin sin inicio, se descarta el fin.
+        hora_desde: normHora(body.hora_desde),
+        hora_hasta: normHora(body.hora_desde) ? normHora(body.hora_hasta) : null,
         descripcion: body.descripcion ? String(body.descripcion).trim() : null,
         creado_por:  body.creado_por ? String(body.creado_por).trim() : null,
       },
@@ -603,6 +625,14 @@ app.patch('/api/db/vacaciones/:id', async (req, res) => {
     const patch = { updated_at: new Date().toISOString() };
     if (b.persona_id  != null) patch.persona_id  = String(b.persona_id).trim();
     if (b.descripcion != null) patch.descripcion = String(b.descripcion).trim() || null;
+    if (b.hora_desde  !== undefined) {
+      patch.hora_desde = normHora(b.hora_desde);
+      // Sin hora de inicio no puede quedar una hora de fin colgada.
+      if (!patch.hora_desde) patch.hora_hasta = null;
+    }
+    if (b.hora_hasta !== undefined && patch.hora_hasta === undefined) {
+      patch.hora_hasta = normHora(b.hora_hasta);
+    }
     if (b.desde != null) {
       if (!VAC_ISO_DATE.test(String(b.desde))) return res.status(400).json({ error: 'desde inválido' });
       patch.desde = String(b.desde);
@@ -635,6 +665,198 @@ app.delete('/api/db/vacaciones/:id', async (req, res) => {
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
+
+// ══════════════════════════════════════════════
+//  AGENDA · AVISOS POR MAIL
+//
+//  Dos envíos automáticos a los usuarios activos de `allowed_users`:
+//    - Víspera:  todos los días 18:00 AR, con lo que arranca mañana.
+//    - Semanal:  domingos 20:00 AR, con la semana que viene (lun a dom).
+//
+//  Ambos traen links de Google Calendar por registro y un .ics con todo.
+//  Endpoints de preview (sin enviar nada) para poder mirarlos en el browser.
+// ══════════════════════════════════════════════
+
+// Destinatarios: los usuarios habilitados del dashboard. Se lee de la base en
+// cada envío, así dar de alta a alguien en `allowed_users` ya lo suscribe.
+async function destinatariosAgenda() {
+  try {
+    const rows = await supa('/allowed_users?active=eq.true&select=email');
+    const mails = (Array.isArray(rows) ? rows : []).map(r => r.email).filter(Boolean);
+    return [...new Set(mails)];
+  } catch (e) {
+    console.error('[agenda] no pude leer destinatarios:', e.message);
+    return [];
+  }
+}
+
+// Registros que SOLAPAN la ventana [desde, hasta], con las personas resueltas.
+async function registrosEntre(desde, hasta) {
+  const [regs, pers] = await Promise.all([
+    supa(`/vacaciones?hasta=gte.${desde}&desde=lte.${hasta}&order=desde.asc`),
+    supa('/vacaciones_personas?activo=eq.true'),
+  ]);
+  const nombre   = new Map();
+  const etiqueta = new Map();
+  (Array.isArray(pers) ? pers : []).forEach(p => {
+    nombre.set(p.id, p.nombre);
+    etiqueta.set(p.id, p.etiqueta);
+  });
+  return { registros: Array.isArray(regs) ? regs : [], nombre, etiqueta };
+}
+
+// URL pública del server, para el link de descarga del .ics dentro del mail.
+function baseUrlServer() {
+  return process.env.RENDER_EXTERNAL_URL || process.env.SELF_PING_URL?.replace(/\/api\/health$/, '') || `http://localhost:${PORT}`;
+}
+
+// Arma el mail de víspera: lo que EMPIEZA mañana.
+async function armarVispera(hoyYmd) {
+  const manana = sumarDias(hoyYmd, 1);
+  const { registros, nombre, etiqueta } = await registrosEntre(manana, manana);
+  // Sólo lo que arranca mañana — no lo que ya venía corriendo.
+  const empiezan = registros.filter(r => r.desde === manana);
+  return {
+    hay: empiezan.length > 0,
+    registros: empiezan,
+    nombre, etiqueta,
+    asunto: `Agenda · mañana ${fmtFechaLarga(manana)}`,
+    html: construirHtml({
+      titulo: 'Mañana en la agenda',
+      bajada: fmtFechaLarga(manana).replace(/^\w/, c => c.toUpperCase()),
+      registros: empiezan,
+      nombrePorPersona: nombre,
+      etiquetaPorPersona: etiqueta,
+      linkIcs: `${baseUrlServer()}/api/agenda/ics?desde=${manana}&hasta=${manana}`,
+    }),
+    ics: construirICS(empiezan, nombre),
+  };
+}
+
+// Arma el resumen semanal: la semana que viene, lunes a domingo.
+async function armarSemanal(hoyYmd) {
+  const lunes   = lunesDeLaSemana(hoyYmd, 1);
+  const domingo = sumarDias(lunes, 6);
+  const { registros, nombre, etiqueta } = await registrosEntre(lunes, domingo);
+  return {
+    hay: registros.length > 0,
+    registros, nombre, etiqueta,
+    asunto: `Agenda · semana del ${fmtFechaLarga(lunes)}`,
+    html: construirHtml({
+      titulo: 'La semana que viene',
+      bajada: `Del ${fmtFechaLarga(lunes)} al ${fmtFechaLarga(domingo)}`,
+      registros,
+      nombrePorPersona: nombre,
+      etiquetaPorPersona: etiqueta,
+      linkIcs: `${baseUrlServer()}/api/agenda/ics?desde=${lunes}&hasta=${domingo}`,
+    }),
+    ics: construirICS(registros, nombre),
+  };
+}
+
+// Descarga .ics de un rango. Lo usan los botones "Agregar todo al calendario"
+// de los mails y el de la propia sección Agenda.
+app.get('/api/agenda/ics', async (req, res) => {
+  try {
+    const desde = String(req.query.desde || '');
+    const hasta = String(req.query.hasta || desde);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(desde) || !/^\d{4}-\d{2}-\d{2}$/.test(hasta)) {
+      return res.status(400).json({ error: 'desde/hasta deben ser YYYY-MM-DD' });
+    }
+    const { registros, nombre } = await registrosEntre(desde, hasta);
+    res.setHeader('Content-Type', 'text/calendar; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="agenda-${desde}.ics"`);
+    res.send(construirICS(registros, nombre));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Preview en el browser, sin mandar nada. ?tipo=vispera|semanal
+app.get('/api/agenda/preview', async (req, res) => {
+  try {
+    const tipo = req.query.tipo === 'semanal' ? 'semanal' : 'vispera';
+    // ?hoy=YYYY-MM-DD permite pararse en otra fecha para probar.
+    const hoy = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.hoy)) ? String(req.query.hoy) : ymdEnAR();
+    const m = tipo === 'semanal' ? await armarSemanal(hoy) : await armarVispera(hoy);
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(m.html);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Envío manual, para probar de verdad una vez cargadas las credenciales.
+// ?tipo=vispera|semanal  ·  ?para=mail@dominio (por defecto, allowed_users)
+app.post('/api/agenda/enviar', async (req, res) => {
+  try {
+    if (!mailConfigurado()) {
+      return res.status(400).json({ error: 'falta configurar GMAIL_USER y GMAIL_APP_PASSWORD en el .env' });
+    }
+    const tipo = req.query.tipo === 'semanal' ? 'semanal' : 'vispera';
+    const hoy = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.hoy)) ? String(req.query.hoy) : ymdEnAR();
+    const m = tipo === 'semanal' ? await armarSemanal(hoy) : await armarVispera(hoy);
+    const para = req.query.para ? [String(req.query.para)] : await destinatariosAgenda();
+    const resultados = await enviarMail({ para, asunto: m.asunto, html: m.html, adjuntoIcs: m.ics });
+    const fallaron = resultados.filter(r => !r.ok);
+    res.json({
+      ok: fallaron.length === 0,
+      tipo,
+      asunto: m.asunto,
+      registros: m.registros.length,
+      enviados: resultados.filter(r => r.ok).map(r => r.para),
+      fallaron,
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Corre un envío automático, con guard de "una vez por día".
+let ultimaVispera = null;
+let ultimaSemanal = null;
+
+async function correrAviso(tipo) {
+  const hoy = ymdEnAR();
+  try {
+    const m = tipo === 'semanal' ? await armarSemanal(hoy) : await armarVispera(hoy);
+    // La víspera sin nada agendado no se manda: nadie quiere un mail diario
+    // que diga "nada". El semanal sí sale siempre, aunque sea para confirmar
+    // que la semana está despejada.
+    if (tipo === 'vispera' && !m.hay) {
+      console.log(`[agenda] víspera ${hoy}: nada arranca mañana, no se envía`);
+      return { ok: true, enviado: false, motivo: 'sin_registros' };
+    }
+    if (!mailConfigurado()) {
+      console.warn(`[agenda] ${tipo}: SMTP sin configurar, no se envía`);
+      return { ok: false, motivo: 'sin_smtp' };
+    }
+    const para = await destinatariosAgenda();
+    const resultados = await enviarMail({ para, asunto: m.asunto, html: m.html, adjuntoIcs: m.ics });
+    const ok = resultados.filter(r => r.ok).length;
+    const mal = resultados.filter(r => !r.ok);
+    console.log(`[agenda] ${tipo}: ${ok}/${para.length} enviados (${m.registros.length} registros)`);
+    if (mal.length) console.warn(`[agenda] ${tipo}: fallaron ${mal.map(r => r.para).join(', ')}`);
+    return { ok: mal.length === 0, enviado: ok > 0, resultados };
+  } catch (e) {
+    console.error(`[agenda] ${tipo} falló:`, e.message);
+    return { ok: false, error: e.message };
+  }
+}
+
+// Scheduler: víspera 18:00 AR todos los días, semanal domingos 20:00 AR.
+// Se chequea en el tick de un minuto en lugar de usar node-cron para no
+// depender de que el proceso esté vivo exactamente a esa hora: si el server
+// arranca entre 18:00 y 18:10, la víspera igual sale.
+setInterval(() => {
+  const { weekday, hour, minute } = getBuenosAiresParts();
+  const m = hour * 60 + minute;
+  const hoy = ymdEnAR();
+
+  if (ultimaVispera !== hoy && m >= 18 * 60 && m < 18 * 60 + 10) {
+    ultimaVispera = hoy;
+    correrAviso('vispera');
+  }
+  if (weekday === 'Sun' && ultimaSemanal !== hoy && m >= 20 * 60 && m < 20 * 60 + 10) {
+    ultimaSemanal = hoy;
+    correrAviso('semanal');
+  }
+}, 60_000);
+
 
 // ══════════════════════════════════════════════
 //  AUTH — Supabase Auth multi-usuario con whitelist (allowed_users)
