@@ -1,6 +1,6 @@
 import { lazy, Suspense, useState, useEffect, useRef } from 'react';
 import {
-  BrowserRouter, Routes, Route, Outlet,
+  BrowserRouter, Routes, Route, Outlet, Navigate,
   useNavigate, useLocation, useOutletContext,
 } from 'react-router-dom';
 import { useMarketData } from './hooks/useMarketData';
@@ -8,6 +8,7 @@ import StatusBar from './components/StatusBar';
 import TickerCard from './components/TickerCard';
 import DollarRates from './components/DollarRates';
 import RatioIntradayCharts from './components/RatioIntradayCharts';
+import CaucionesPanel from './components/CaucionesPanel';
 import OutOfOfficeModal from './components/OutOfOfficeModal';
 import { AuthProvider, useAuth } from './auth/AuthContext';
 import AuthGate from './auth/AuthGate';
@@ -33,14 +34,14 @@ const CartasPage            = lazy(() => import('./components/CartasPage'));
 const FondosPershing        = lazy(() => import('./components/FondosPershing'));
 const CalculadoraRotaciones = lazy(() => import('./components/CalculadoraRotaciones'));
 const AvisosSaldoPage       = lazy(() => import('./components/AvisosSaldoPage'));
-const ClientesPage          = lazy(() => import('./components/ClientesPage'));
+const VacacionesPage        = lazy(() => import('./components/VacacionesPage'));
 
 const TICKERS = ['AL30', 'AL30D', 'AL30C'];
 
 // El orden define cómo aparecen en el menú desplegable.
 const TABS = [
   { path: '/',             label: 'INICIO',                    group: 'Principal' },
-  { path: '/fx',           label: 'TIPO DE CAMBIO',            group: 'Mercado' },
+  { path: '/mercado',      label: 'MERCADO',                   group: 'Mercado' },
   { path: '/renta-fija',   label: 'RENTA FIJA CORP.',          group: 'Mercado' },
   { path: '/soberanos',    label: 'BONOS SOBERANOS',           group: 'Mercado' },
   { path: '/subsoberanos', label: 'SUBSOBERANOS',              group: 'Mercado' },
@@ -51,7 +52,7 @@ const TABS = [
   { path: '/propuestas',   label: 'PROPUESTAS',                group: 'Gestión' },
   { path: '/cartas',       label: 'CARTAS',                    group: 'Gestión' },
   { path: '/avisos-saldo', label: 'AVISO DE SALDO',            group: 'Gestión' },
-  { path: '/clientes',     label: 'CLIENTES',                  group: 'Gestión' },
+  { path: '/vacaciones',   label: 'VACACIONES',                group: 'Gestión' },
 ];
 
 export default function App() {
@@ -62,7 +63,9 @@ export default function App() {
           <Routes>
             <Route element={<Layout />}>
               <Route index               element={<HomeRoute />} />
-              <Route path="fx"           element={<FxRoute />} />
+              <Route path="mercado"      element={<FxRoute />} />
+              {/* La sección se llamaba "tipo de cambio"; los links viejos siguen andando. */}
+              <Route path="fx"           element={<Navigate to="/mercado" replace />} />
               <Route path="renta-fija"   element={<RfRoute />} />
               <Route path="soberanos"    element={<SobRoute />} />
               <Route path="subsoberanos" element={<SubRoute />} />
@@ -73,7 +76,7 @@ export default function App() {
               <Route path="cartas"       element={<CartasRoute />} />
               <Route path="pershing"     element={<PershingRoute />} />
               <Route path="avisos-saldo" element={<AvisosRoute />} />
-              <Route path="clientes"     element={<ClientesRoute />} />
+              <Route path="vacaciones"   element={<VacacionesRoute />} />
               <Route path="*"            element={<NotFoundRoute />} />
             </Route>
           </Routes>
@@ -262,22 +265,49 @@ function FxRoute() {
   const [commission, setCommission] = useState(0.6);
   const market = useMarketStatusShared();
   const marketOpen = !!market?.open;
+
+  // El precio de los bonos es insumo del cálculo, no el dato que se mira todo
+  // el día: arranca plegado y se abre cuando hace falta verificarlo.
+  const [bonosAbierto, setBonosAbierto] = useState(false);
+
+  // Plazo real con el que el server está suscripto a cada bono. Debería decir
+  // CI (contado inmediato) siempre; se muestra para que se note si no.
+  const plazos = market?.fxSettlement || {};
+  const plazoUnico = [...new Set(TICKERS.map(t => plazos[t]).filter(Boolean))];
+  const plazoLabel = plazoUnico.length === 1 ? plazoUnico[0] : plazoUnico.join(' / ');
+
   return (
     <>
       <section>
-        <SH title="COTIZACIONES AL30" />
-        <div style={st.grid3}>
-          {TICKERS.map((t, i) => (
-            <TickerCard
-              key={t}
-              ticker={t}
-              label={({ AL30: 'Pesos (ARS)', AL30D: 'Dólar MEP (USD-D)', AL30C: 'Dólar Cable (USD-C)' })[t]}
-              data={data[t]}
-              marketOpen={marketOpen}
-              delay={i * 100}
-            />
-          ))}
-        </div>
+        <button
+          type="button"
+          style={st.disclosure}
+          onClick={() => setBonosAbierto(v => !v)}
+          aria-expanded={bonosAbierto}
+        >
+          <span style={st.disclosureCaret}>{bonosAbierto ? '▾' : '▸'}</span>
+          <span style={st.disclosureTitle}>COTIZACIONES AL30</span>
+          {plazoLabel && (
+            <span style={plazoLabel === 'CI' ? st.plazoOk : st.plazoWarn}>
+              {plazoLabel === 'CI' ? 'CONTADO INMEDIATO' : `PLAZO ${plazoLabel.toUpperCase()}`}
+            </span>
+          )}
+          <span style={st.disclosureHint}>{bonosAbierto ? 'ocultar' : 'ver precios'}</span>
+        </button>
+        {bonosAbierto && (
+          <div style={{ ...st.grid3, marginTop: 14 }}>
+            {TICKERS.map((t, i) => (
+              <TickerCard
+                key={t}
+                ticker={t}
+                label={({ AL30: 'Pesos (ARS)', AL30D: 'Dólar MEP (USD-D)', AL30C: 'Dólar Cable (USD-C)' })[t]}
+                data={data[t]}
+                marketOpen={marketOpen}
+                delay={i * 100}
+              />
+            ))}
+          </div>
+        )}
       </section>
       <section style={{ marginTop: 48 }}>
         <SH title="DÓLARES FINANCIEROS" />
@@ -295,6 +325,10 @@ function FxRoute() {
           <span style={st.commNote}>por operación (se aplica a cada pata: compra y venta de bonos)</span>
         </div>
         <DollarRates data={data} commission={commission / 100} market={market} />
+      </section>
+      <section style={{ marginTop: 32 }}>
+        <SH title="CAUCIONES EN PESOS" />
+        <CaucionesPanel />
       </section>
       <section style={{ marginTop: 32 }}>
         <SH title="EVOLUCIÓN DEL TIPO DE CAMBIO" />
@@ -336,8 +370,8 @@ function PershingRoute() {
 function AvisosRoute() {
   return <section><SH title="AVISO DE SALDO" /><AvisosSaldoPage /></section>;
 }
-function ClientesRoute() {
-  return <section><SH title="CLIENTES" /><ClientesPage /></section>;
+function VacacionesRoute() {
+  return <section><SH title="VACACIONES" /><VacacionesPage /></section>;
 }
 
 // Mini-menu con email del user logueado + botón cerrar sesión.
@@ -404,6 +438,35 @@ function SH({ title }) {
 }
 
 const st = {
+  // ── Encabezado plegable ──
+  // Mismo peso visual que SH, pero clickeable. Lo usa la sección de
+  // cotizaciones AL30, cuyos precios son insumo del cálculo de MEP/CCL y no
+  // algo que haya que tener a la vista todo el tiempo.
+  disclosure: {
+    display: 'flex', alignItems: 'center', gap: 10, width: '100%',
+    background: 'none', border: 'none', borderBottom: '1px solid var(--border)',
+    padding: '0 0 10px', cursor: 'pointer', textAlign: 'left',
+  },
+  disclosureCaret: { color: 'var(--neon)', fontSize: 11, lineHeight: 1 },
+  disclosureTitle: {
+    fontFamily: "'Montserrat', sans-serif", fontSize: 12, fontWeight: 700,
+    letterSpacing: 3, color: 'var(--text)',
+  },
+  disclosureHint: {
+    marginLeft: 'auto', fontFamily: "'Roboto Mono',monospace", fontSize: 9,
+    letterSpacing: 1, color: 'var(--text-dim)', opacity: 0.7,
+  },
+  // Plazo con el que el server está suscripto. Verde = contado inmediato (lo
+  // esperado); ámbar = cualquier otra cosa, que hay que mirar.
+  plazoOk: {
+    fontFamily: "'Roboto Mono',monospace", fontSize: 8, fontWeight: 700, letterSpacing: 1.2,
+    color: 'var(--neon)', border: '1px solid var(--neon)', borderRadius: 3, padding: '2px 6px',
+  },
+  plazoWarn: {
+    fontFamily: "'Roboto Mono',monospace", fontSize: 8, fontWeight: 700, letterSpacing: 1.2,
+    color: '#f59e0b', border: '1px solid #f59e0b', borderRadius: 3, padding: '2px 6px',
+  },
+
   // Padding lateral y vertical responsivos (vars en index.css que cambian
   // a 1024px y 720px). El maxWidth absoluto se mantiene para no estirar
   // demás en monitores de 1440+.

@@ -179,19 +179,53 @@ export default function BondPage({ config }) {
   const dbFavsRef=useRef(dbFavs);
   useEffect(()=>{dbFavsRef.current=dbFavs;},[dbFavs]);
 
+  // La grilla ya no se arma acá: la mantiene el server, que refresca cada
+  // categoría cada minuto en background y guarda el último valor bueno de
+  // cada instrumento. Acá pedimos ese snapshot, que llega al instante y sin
+  // depender de que ~100 llamadas a PPI salgan bien justo ahora.
+  //
+  // Lo importante: NO se filtran filas. Antes esto hacía
+  //   data.filter(d => !d.error && d.bond)
+  // y por eso un instrumento que fallaba desaparecía de la tabla hasta el
+  // ciclo siguiente. Ahora una fila que falló viene marcada como `stale`,
+  // conserva su último valor conocido y se muestra atenuada.
   const fetchFavorites=useCallback(async()=>{
-    let tickers,freshFavs;
-    try{const r=await fetch(`${API}/api/db/${dbRoute}`);freshFavs=await r.json();if(Array.isArray(freshFavs)){setDbFavs(freshFavs);tickers=freshFavs.map(f=>f.ticker);}else{tickers=dbFavsRef.current.map(f=>f.ticker);freshFavs=dbFavsRef.current;}}
-    catch{tickers=dbFavsRef.current.map(f=>f.ticker);freshFavs=dbFavsRef.current;}
-    if(!tickers.length){setFavData([]);return;}
+    let freshFavs=dbFavsRef.current;
+    try{const r=await fetch(`${API}/api/db/${dbRoute}`);const j=await r.json();if(Array.isArray(j)){freshFavs=j;setDbFavs(j);}}catch{}
     setFavLoading(true);
-    try{const res=await fetch(`${API}/api/ppi/bonds/batch?type=${apiType}&settlement=${settlement}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tickers})});const data=await res.json();const rawBonds={};const dbMap={};(freshFavs||[]).forEach(f=>{dbMap[f.ticker]=f;});
-    // dailyVar = variación vs cierre anterior (estándar de mercado).
-    // El server expone también `dailyVar` (vs opening) por si se quiere
-    // alternar; acá usamos `dailyVarPrevClose` por pedido del usuario.
-    const rows=data.filter(d=>!d.error&&d.bond).map(d=>{rawBonds[d.ticker]=d.bond;const db=dbMap[d.ticker]||{};const row={ticker:d.ticker,price:d.price,dailyVar:d.dailyVarPrevClose,tir:d.bond.tir,md:d.bond.md,issuer:d.bond.issuer,coupon:extractCoupon(d.bond.interests),expirationDate:d.bond.expirationDate,law:db.ley||d.bond.law||'',minimalSheet:d.bond.minimalSheet,isin:d.bond.isin};if(showPaymentMonths)row.paymentMonths=extractMonths(d.bond.flows);return row;});
-    setFavRawBonds(rawBonds);setFavData(rows);setFavLastUpdate(new Date());setCountdown(60);}catch(e){console.error('Fav fetch:',e);}finally{setFavLoading(false);}
-  },[dbRoute,apiType,settlement,showPaymentMonths]);
+    try{
+      const res=await fetch(`${API}/api/ppi/bonds/grid?route=${encodeURIComponent(dbRoute)}`);
+      if(!res.ok)throw new Error(`HTTP ${res.status}`);
+      const snap=await res.json();
+      const dbMap={};(freshFavs||[]).forEach(f=>{dbMap[f.ticker]=f;});
+      const rawBonds={};
+      // dailyVar = variación vs cierre anterior (estándar de mercado). El
+      // server expone también la variación vs apertura por si se quiere
+      // alternar.
+      const rows=(snap.rows||[]).map(d=>{
+        const db=dbMap[d.ticker]||{};
+        if(d.bond)rawBonds[d.ticker]=d.bond;
+        const row={
+          ticker:d.ticker,
+          price:d.price??null,
+          dailyVar:d.dailyVarPrevClose??null,
+          tir:d.bond?.tir??null,
+          md:d.bond?.md??null,
+          issuer:d.bond?.issuer||db.empresa||'',
+          coupon:d.bond?extractCoupon(d.bond.interests):null,
+          expirationDate:d.bond?.expirationDate||null,
+          law:db.ley||d.bond?.law||'',
+          minimalSheet:d.bond?.minimalSheet??null,
+          isin:d.bond?.isin||'',
+          stale:!!d.stale,
+          ageSeconds:d.ageSeconds??null,
+        };
+        if(showPaymentMonths)row.paymentMonths=d.bond?extractMonths(d.bond.flows):[];
+        return row;
+      });
+      setFavRawBonds(rawBonds);setFavData(rows);setFavLastUpdate(new Date());setCountdown(60);
+    }catch(e){console.error('Grid fetch:',e);}finally{setFavLoading(false);}
+  },[dbRoute,showPaymentMonths]);
 
   useEffect(()=>{fetchFavorites();refreshRef.current=setInterval(fetchFavorites,REFRESH_MS);return()=>clearInterval(refreshRef.current);},[fetchFavorites]);
   useEffect(()=>{countdownRef.current=setInterval(()=>setCountdown(c=>c<=1?60:c-1),1000);return()=>clearInterval(countdownRef.current);},[]);
@@ -241,7 +275,7 @@ export default function BondPage({ config }) {
 
       {/* TABLE */}
       <div style={{marginTop:40}}>
-        <div style={S.favTitleRow}><h3 style={S.favTitle}>{title}</h3><div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}><button style={S.toolBtn} onClick={()=>setShowChart(!showChart)}>{showChart?'✕ CURVA':`📈 CURVA${flyerSel.size?` (${flyerSel.size})`:''}`}</button><button style={S.toolBtn} onClick={()=>setShowFlyer(true)}>📷 FLYER{flyerSel.size?` (${flyerSel.size})`:''}</button><button style={S.toolBtn} onClick={()=>setShowFilters(!showFilters)}>{showFilters?'✕ FILTROS':'⊞ FILTROS'}</button><button style={S.refreshBtn} onClick={fetchFavorites} disabled={favLoading}>{favLoading?<span style={S.spinnerSm}/>:'↻'}</button></div></div>
+        <div style={S.favTitleRow}><h3 className="t-outline" style={S.favTitle}>{title}</h3><div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}><button style={S.toolBtn} onClick={()=>setShowChart(!showChart)}>{showChart?'✕ CURVA':`📈 CURVA${flyerSel.size?` (${flyerSel.size})`:''}`}</button><button style={S.toolBtn} onClick={()=>setShowFlyer(true)}>📷 FLYER{flyerSel.size?` (${flyerSel.size})`:''}</button><button style={S.toolBtn} onClick={()=>setShowFilters(!showFilters)}>{showFilters?'✕ FILTROS':'⊞ FILTROS'}</button><button style={S.refreshBtn} onClick={fetchFavorites} disabled={favLoading}>{favLoading?<span style={S.spinnerSm}/>:'↻'}</button></div></div>
         <div style={S.favMeta}>{favLastUpdate&&<span>Actualizado {favLastUpdate.toLocaleTimeString('es-AR',{hour:'2-digit',minute:'2-digit',second:'2-digit'})}</span>}<span style={S.countdown}><span style={S.countdownDot}/>{countdown}s</span><span style={{opacity:0.4,fontSize:9}}>Supabase · {dbFavs.length} papeles</span></div>
 
         <div style={S.tableWrap}>
@@ -261,7 +295,9 @@ export default function BondPage({ config }) {
               {favLoading&&!favData.length?Array.from({length:8}).map((_,i)=><tr key={i}><td style={{...S.td,borderRight:CB}}></td><td style={{...S.td,borderRight:CB}}></td><td style={{...S.td,borderRight:CB}}></td>{columns.map((c,ci)=><td key={c.key} style={{...S.td,borderRight:ci<columns.length-1?CB:'none'}}><div style={{...S.skelCell,width:`${40+Math.random()*40}%`,margin:'0 auto'}}/></td>)}</tr>)
               :!processedData.length?<tr><td colSpan={columns.length+3} style={{...S.td,textAlign:'center',padding:32,color:'var(--text-dim)'}}>Sin datos</td></tr>
               :processedData.map((row,ri)=>(
-                <tr key={row.ticker} style={{background:ri%2===0?'var(--row-alt)':'transparent',cursor:'pointer'}} onMouseEnter={e=>{e.currentTarget.style.background='var(--row-hover)';}} onMouseLeave={e=>{e.currentTarget.style.background=ri%2===0?'var(--row-alt)':'transparent';}} onClick={()=>openDetail(row)}>
+                /* Una fila `stale` es una cuyo último refresh contra PPI falló:
+                   muestra el valor anterior, atenuada, en vez de desaparecer. */
+                <tr key={row.ticker} title={row.stale?`Sin actualizar hace ${row.ageSeconds!=null?`${row.ageSeconds}s`:'un rato'} — mostrando el último valor conocido`:undefined} style={{background:ri%2===0?'var(--row-alt)':'transparent',cursor:'pointer',opacity:row.stale?0.55:1}} onMouseEnter={e=>{e.currentTarget.style.background='var(--row-hover)';}} onMouseLeave={e=>{e.currentTarget.style.background=ri%2===0?'var(--row-alt)':'transparent';}} onClick={()=>openDetail(row)}>
                   <td style={{...S.td,textAlign:'center',borderRight:CB}} onClick={e=>e.stopPropagation()}><button style={S.removeFavBtn} onClick={()=>removeFromFavorites(row.ticker)}>×</button></td>
                   <td style={{...S.td,textAlign:'center',borderRight:CB}} onClick={e=>e.stopPropagation()}><button style={S.addCarteraBtn} onClick={()=>setCarteraPopup({ticker:row.ticker,precio:row.price,laminaMinima:row.minimalSheet})} title="Agregar a cartera">＋</button></td>
                   <td style={{...S.td,textAlign:'center',borderRight:CB,padding:'8px 2px'}} onClick={e=>e.stopPropagation()}><input type="checkbox" checked={flyerSel.has(row.ticker)} onChange={()=>{setFlyerSel(p=>{const n=new Set(p);if(n.has(row.ticker))n.delete(row.ticker);else n.add(row.ticker);return n;});}} style={{cursor:'pointer',accentColor:'var(--neon)'}}/></td>
@@ -274,7 +310,10 @@ export default function BondPage({ config }) {
                     // 0.005 captura cualquier valor que se mostraría como
                     // "+0.00%" o "-0.00%" tras toFixed(2).
                     if(col.isVar){const c=v==null||Math.abs(v)<0.005?'var(--text-dim)':(v>0?'var(--green)':'var(--red)');return<td key={col.key} style={{...S.td,textAlign:'center',color:c,fontWeight:700,borderRight:br}}>{col.fmt(v)}</td>;}
-                    return<td key={col.key} style={{...S.td,textAlign:'center',color:col.dynamic?'var(--neon)':'var(--text)',fontWeight:col.key==='ticker'||col.dynamic?700:400,borderRight:br}}>{col.fmt(v)}</td>;
+                    // `dynamic` son las columnas de precio. En modo oscuro van
+                    // blancas con contorno celeste (.n-outline), porque el
+                    // --neon azul-acero sobre el navy se lee mal.
+                    return<td key={col.key} className={col.dynamic?'n-outline':undefined} style={{...S.td,textAlign:'center',color:col.dynamic?'var(--neon)':'var(--text)',fontWeight:col.key==='ticker'||col.dynamic?700:400,borderRight:br}}>{col.fmt(v)}</td>;
                   })}
                 </tr>
               ))}

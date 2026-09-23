@@ -16,36 +16,56 @@
 
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 
-// ── Personas configurables ──
-// Cambiar acá si rotan los asesores. El orden no importa visualmente: el
-// modal siempre muestra a los dos que NO se eligieron como "ausente".
-const PERSONAS = [
-  { key: 'delfino', name: 'Juan Manuel Delfino',          phone: '+54 9 11 4071-7624' },
-  { key: 'hary',    name: 'Julián Hary Beccar Varela',    phone: '+54 9 11 5580-2756' },
-  { key: 'gavina',  name: 'Gonzalo Gaviña Alvarado',      phone: '+54 9 11 6373-3920' },
-];
+// ── Personas ──
+// Vienen de la tabla `vacaciones_personas` (la misma lista que usa la sección
+// VACACIONES), así hay un solo lugar donde se dan de alta o se cambian los
+// teléfonos. La `key` es la etiqueta (JMD/GGA/FD/JH): estable y legible.
+//
+// Sólo quien tenga teléfono cargado se ofrece como contacto alternativo en el
+// cartel — no tiene sentido mostrar un nombre sin número a quién llamar.
+const API = import.meta.env.VITE_API_URL || 'http://localhost:3001';
+
+function usePersonas() {
+  const [personas, setPersonas] = useState([]);
+  useEffect(() => {
+    let vivo = true;
+    fetch(`${API}/api/db/vacaciones-personas`)
+      .then(r => r.ok ? r.json() : [])
+      .then(data => {
+        if (!vivo) return;
+        setPersonas((Array.isArray(data) ? data : []).map(p => ({
+          key: p.etiqueta,
+          name: p.nombre,
+          phone: p.telefono || '',
+        })));
+      })
+      .catch(() => { if (vivo) setPersonas([]); });
+    return () => { vivo = false; };
+  }, []);
+  return personas;
+}
 
 const STORAGE_KEY = 'ooo_modal_state_v1';
 
 // ── Helpers ──
 
-const MONTHS_ES = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
-const MONTHS_ES_SHORT = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
+export const MONTHS_ES = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
+export const MONTHS_ES_SHORT = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
 const WEEKDAYS_ES = ['L', 'M', 'M', 'J', 'V', 'S', 'D'];
 
-function pad(n) { return String(n).padStart(2, '0'); }
+export function pad(n) { return String(n).padStart(2, '0'); }
 
-function todayIso() {
+export function todayIso() {
   const d = new Date();
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
-function dateToIso(d) {
+export function dateToIso(d) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
 // Parsea YYYY-MM-DD respetando timezone local (no UTC).
-function parseLocalDate(iso) {
+export function parseLocalDate(iso) {
   if (!iso) return null;
   const [y, m, d] = iso.split('-').map(Number);
   if (!y || !m || !d) return null;
@@ -102,6 +122,34 @@ const CX = W / 2;          // centro x
 const CY = H / 2;          // centro y
 const R  = W / 2;          // radio del círculo de WhatsApp (= mitad del canvas)
 
+// Ancho útil del círculo a la altura `y`: la cuerda horizontal a esa altura,
+// menos un margen a cada lado. A medida que uno se aleja del centro vertical
+// el círculo se angosta, así que una línea que entra a la altura del separador
+// puede no entrar a la altura del título.
+function anchoUtil(y, margen = 70) {
+  const dy = Math.abs(y - CY);
+  if (dy >= R) return 0;
+  return 2 * Math.sqrt(R * R - dy * dy) - margen * 2;
+}
+
+// Dibuja texto centrado en `y` con el cuerpo más grande que entre en el
+// círculo: arranca en `size` y va bajando de a 2px hasta que mida menos que
+// el ancho útil. Así los nombres largos (Julián Hary Beccar Varela) nunca se
+// salen del recorte y los cortos aprovechan todo el espacio.
+function textoAjustado(ctx, texto, y, { peso, size, familia, margen = 70, min = 16 }) {
+  const max = anchoUtil(y, margen);
+  let s = size;
+  ctx.font = `${peso} ${s}px ${familia}`;
+  while (s > min && ctx.measureText(texto).width > max) {
+    s -= 2;
+    ctx.font = `${peso} ${s}px ${familia}`;
+  }
+  ctx.fillText(texto, CX, y);
+}
+
+const SERIF = '"Cormorant Garamond", "Times New Roman", serif';
+const SANS  = '"Montserrat", "Roboto", sans-serif';
+
 function drawOOO(canvas, { otros, dateLabel, bgImg, logoImg }) {
   if (!canvas) return;
   canvas.width = W;
@@ -149,22 +197,21 @@ function drawOOO(canvas, { otros, dateLabel, bgImg, logoImg }) {
 
   // Logo D&G — centrado, bien arriba pero dentro del círculo
   if (logoImg) {
-    const logoH = 110;
+    const logoH = 132;
     const logoW = (logoImg.width / logoImg.height) * logoH;
-    const logoY = 200; // top del logo
+    const logoY = 186; // top del logo
     ctx.drawImage(logoImg, CX - logoW / 2, logoY, logoW, logoH);
   }
 
   // Título "Fuera de oficina"
   ctx.fillStyle = '#FEF8E6';
-  ctx.font = '600 68px "Cormorant Garamond", "Times New Roman", serif';
-  ctx.fillText('Fuera de oficina', CX, 410);
+  textoAjustado(ctx, 'Fuera de oficina', 412, { peso: 600, size: 92, familia: SERIF });
 
-  // Fecha (si está completa)
+  // Fecha (si está completa). Es la línea más larga del cartel — le damos un
+  // margen menor porque va cerca del centro, donde el círculo es más ancho.
   if (dateLabel) {
-    ctx.font = '400 30px "Montserrat", "Roboto", sans-serif';
-    ctx.fillStyle = 'rgba(254,248,230,0.85)';
-    ctx.fillText(dateLabel, CX, 478);
+    ctx.fillStyle = 'rgba(254,248,230,0.88)';
+    textoAjustado(ctx, dateLabel, 484, { peso: 400, size: 38, familia: SANS, margen: 55 });
   }
 
   // Separador — más cerca del centro vertical donde el círculo es más ancho
@@ -177,24 +224,31 @@ function drawOOO(canvas, { otros, dateLabel, bgImg, logoImg }) {
   ctx.stroke();
 
   // Label "COMUNICARSE CON"
-  ctx.font = '700 18px "Montserrat", sans-serif';
-  ctx.fillStyle = 'rgba(254,248,230,0.65)';
-  ctx.fillText('COMUNICARSE CON', CX, lineY + 38);
+  ctx.font = '700 23px "Montserrat", sans-serif';
+  ctx.fillStyle = 'rgba(254,248,230,0.68)';
+  ctx.letterSpacing = '3px';
+  ctx.fillText('COMUNICARSE CON', CX, lineY + 44);
+  ctx.letterSpacing = '0px';
 
-  // Contactos (los que NO están ausentes). El gap se ajusta automáticamente
-  // para mantenerse dentro del círculo, sin importar si son 1 o 2.
-  const contactStartY = lineY + 105;
-  const contactGap = otros.length === 1 ? 0 : 145;
+  // Contactos (los que NO están ausentes y tienen teléfono). Con 1 solo
+  // contacto lo centramos más abajo y lo agrandamos, porque sobra lugar;
+  // con 2 ó más apretamos el interlineado para no pasarnos del círculo.
+  // Nunca son más de dos (ver el slice en el componente). Con uno solo sobra
+  // lugar y conviene agrandarlo; con dos, el bloque termina cerca de y=850,
+  // cómodo dentro del círculo.
+  const varios = otros.length > 1;
+  const contactStartY = lineY + (varios ? 118 : 132);
+  const contactGap    = varios ? 152 : 0;
+  const nombreSize    = varios ? 46 : 54;
+  const telSize       = varios ? 35 : 40;
+  const telOffset     = 54;
+
   otros.forEach((p, i) => {
     const y = contactStartY + i * contactGap;
-    // Nombre
-    ctx.font = '600 36px "Cormorant Garamond", "Times New Roman", serif';
     ctx.fillStyle = '#FEF8E6';
-    ctx.fillText(p.name, CX, y);
-    // Teléfono
-    ctx.font = '500 28px "Montserrat", "Roboto Mono", monospace';
-    ctx.fillStyle = 'rgba(254,248,230,0.85)';
-    ctx.fillText(p.phone, CX, y + 46);
+    textoAjustado(ctx, p.name, y, { peso: 600, size: nombreSize, familia: SERIF });
+    ctx.fillStyle = 'rgba(254,248,230,0.88)';
+    textoAjustado(ctx, p.phone, y + telOffset, { peso: 500, size: telSize, familia: SANS });
   });
 }
 
@@ -204,7 +258,7 @@ function drawOOO(canvas, { otros, dateLabel, bgImg, logoImg }) {
 // a la vez con navegación prev/next. En modo range, click 1 setea `from`,
 // click 2 setea `to` (si es anterior a from, intercambia); click 3 reinicia.
 
-function MiniCalendar({ mode, fromIso, toIso, onChange }) {
+export function MiniCalendar({ mode, fromIso, toIso, onChange }) {
   // Mes "anclado" del calendario (por defecto, el del fromIso; si no hay,
   // hoy). El usuario puede cambiarlo con prev/next sin perder selección.
   const initialAnchor = parseLocalDate(fromIso) || new Date();
@@ -320,7 +374,8 @@ function MiniCalendar({ mode, fromIso, toIso, onChange }) {
 // ─── Componente principal ──────────────────────────────────────────────────
 
 export default function OutOfOfficeModal({ onClose }) {
-  const [persona,  setPersona]  = useState(() => loadState().persona  ?? 'delfino');
+  const personas = usePersonas();
+  const [persona,  setPersona]  = useState(() => loadState().persona  ?? '');
   const [mode,     setMode]     = useState(() => loadState().mode     ?? 'range');
   const [fromIso,  setFromIso]  = useState(() => loadState().dateFrom ?? todayIso());
   const [toIso,    setToIso]    = useState(() => loadState().dateTo   ?? todayIso());
@@ -334,6 +389,14 @@ export default function OutOfOfficeModal({ onClose }) {
   useEffect(() => {
     saveState({ persona, mode, dateFrom: fromIso, dateTo: toIso });
   }, [persona, mode, fromIso, toIso]);
+
+  // Cuando llega la lista, sincronizamos el estado con lo que el <select>
+  // está mostrando. Hace falta si no había nada guardado, o si lo guardado
+  // era una key vieja ('delfino') o alguien que ya no está en la lista.
+  useEffect(() => {
+    if (personas.length === 0) return;
+    if (!personas.some(p => p.key === persona)) setPersona(personas[0].key);
+  }, [personas, persona]);
 
   // Cargar fondos institucionales.
   useEffect(() => {
@@ -363,8 +426,20 @@ export default function OutOfOfficeModal({ onClose }) {
     if (mode === 'single' && toIso !== fromIso) setToIso(fromIso);
   }, [mode, fromIso, toIso]);
 
-  const ausente = useMemo(() => PERSONAS.find(p => p.key === persona) || PERSONAS[0], [persona]);
-  const otros   = useMemo(() => PERSONAS.filter(p => p.key !== persona), [persona]);
+  // El valor guardado en localStorage puede apuntar a alguien que ya no está
+  // (o a las keys viejas 'delfino'/'hary'/'gavina'): caemos al primero.
+  const ausente = useMemo(
+    () => personas.find(p => p.key === persona) || personas[0] || null,
+    [personas, persona],
+  );
+  // El cartel muestra como máximo DOS contactos: más nombres obligan a achicar
+  // el cuerpo para que entren en el círculo y se vuelve ilegible en la foto de
+  // perfil. Se toman los dos primeros por el campo `orden` de la tabla
+  // vacaciones_personas — cambiando ese orden se elige quién aparece.
+  const otros = useMemo(
+    () => personas.filter(p => p.key !== ausente?.key && p.phone).slice(0, 2),
+    [personas, ausente],
+  );
   const dateLabel = useMemo(
     () => formatDateLabel(mode, fromIso, mode === 'range' ? toIso : null),
     [mode, fromIso, toIso]
@@ -377,7 +452,7 @@ export default function OutOfOfficeModal({ onClose }) {
   const flash = (kind) => { setStatus(kind); setTimeout(() => setStatus(null), 1800); };
 
   const filename = useMemo(() => {
-    const slug = ausente.key;
+    const slug = (ausente?.key || "sin-persona").toLowerCase();
     const date = mode === 'range' ? `${fromIso}_${toIso}` : fromIso;
     return `fuera-de-oficina_${slug}_${date}.png`;
   }, [ausente, mode, fromIso, toIso]);
@@ -431,7 +506,8 @@ export default function OutOfOfficeModal({ onClose }) {
           <div style={S.form}>
             <Field label="¿Quién está fuera?">
               <select value={persona} onChange={e => setPersona(e.target.value)} style={S.input}>
-                {PERSONAS.map(p => <option key={p.key} value={p.key}>{p.name}</option>)}
+                {personas.length === 0 && <option value="">Cargando…</option>}
+                {personas.map(p => <option key={p.key} value={p.key}>{p.name}</option>)}
               </select>
             </Field>
 

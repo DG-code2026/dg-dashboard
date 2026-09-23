@@ -69,6 +69,11 @@
      el --neon azul-acero (que se usa para chips/borders/links). En light
      se sobreescribe a navy fuerte abajo. */
   --title-color: #FFFFFF;
+
+  /* Celeste del contorno de títulos y precios en modo oscuro. El --neon
+     (#6386AC) sobre el fondo navy queda apagado y cuesta leerlo, así que el
+     texto pasa a blanco y el color se conserva como un borde finito. */
+  --outline: #8AC7EA;
 }
 
 [data-theme="light"] {
@@ -255,3 +260,40 @@ body { font-family: 'Montserrat', sans-serif; background: var(--bg); color: var(
   to   { transform: translateX(-50%); }
 }
 .news-viewport:hover .news-track { animation-play-state: paused; }
+
+/* ─────────────────────────────────────────────────────────────────────────
+   TÍTULOS Y PRECIOS EN MODO OSCURO
+
+   El azul acero de --neon sobre el fondo navy tiene poco contraste: los
+   títulos de sección y los precios quedaban apagados. Pasan a blanco con un
+   contorno celeste finito, que conserva el color institucional como acento
+   sin comerse la legibilidad.
+
+   Dos grosores porque el trazo es proporcionalmente más invasivo cuanto más
+   chica es la tipografía: 0.6px para títulos, 0.4px para números de tabla.
+   El !important es necesario porque los componentes setean `color` inline.
+
+   En modo claro no aplica: ahí --neon es navy sobre crema y se lee perfecto.
+   ───────────────────────────────────────────────────────────────────────── */
+[data-theme="dark"] .t-outline {
+  color: #FFFFFF !important;
+  -webkit-text-stroke: 0.6px var(--outline);
+  paint-order: stroke fill;
+}
+
+[data-theme="dark"] .n-outline {
+  color: #FFFFFF !important;
+  -webkit-text-stroke: 0.4px var(--outline);
+  paint-order: stroke fill;
+}
+
+/* Firefox no soporta -webkit-text-stroke; ahí caemos a un contorno por
+   sombra, que se ve casi igual y no deja el texto sin borde. */
+@supports not (-webkit-text-stroke: 1px black) {
+  [data-theme="dark"] .t-outline,
+  [data-theme="dark"] .n-outline {
+    text-shadow:
+       0   1px 0 var(--outline),  0  -1px 0 var(--outline),
+       1px 0   0 var(--outline), -1px  0   0 var(--outline);
+  }
+}

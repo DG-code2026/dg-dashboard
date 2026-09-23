@@ -68,7 +68,7 @@ export default function TickerCard({ ticker, label, data, marketOpen, delay }) {
       {/* Header compacto: ticker + label a la izq, badge a la der */}
       <div style={styles.cardHeader}>
         <div style={styles.titleGroup}>
-          <span style={styles.ticker}>{ticker}</span>
+          <span className="t-outline" style={styles.ticker}>{ticker}</span>
           <span style={styles.label}>{label}</span>
         </div>
         <div style={styles.liveIndicator}>

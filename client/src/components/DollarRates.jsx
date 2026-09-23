@@ -203,8 +203,8 @@ function DollarCard({ title, pair, rates, kind, delay, onShare }) {
       <div style={S.sidesRow}>
         <div style={S.sideCol}>
           <ShareBtn onClick={() => onShare({ op: kind, side: 'compra', sin: rates.compra.sin, con: rates.compra.con, isPct: false })} color="var(--neon)" />
-          <span style={{ ...S.sideLabel, color: 'var(--neon)' }}>COMPRA</span>
-          <span style={{ ...S.mainPrice, color: 'var(--neon)' }}>${fmtPrice(rates.compra.con)}</span>
+          <span className="t-outline" style={{ ...S.sideLabel, color: 'var(--neon)' }}>COMPRA</span>
+          <span className="n-outline" style={{ ...S.mainPrice, color: 'var(--neon)' }}>${fmtPrice(rates.compra.con)}</span>
           <div style={S.sinRow}><span style={S.sinLabel}>SIN COM.</span><span style={S.sinValue}>${fmtPrice(rates.compra.sin)}</span><Var value={rates.compra.var} /></div>
         </div>
         <div style={S.sideDivider} />
@@ -226,9 +226,9 @@ function CanjeCard({ rates, delay, onShare }) {
       <div style={S.sidesRow}>
         <div style={S.sideCol}>
           <ShareBtn onClick={() => onShare({ op: 'canje', side: 'compra', sin: rates.compra.sin, con: rates.compra.con, isPct: true })} color="var(--neon)" />
-          <span style={{ ...S.sideLabel, color: 'var(--neon)' }}>COMPRA</span>
+          <span className="t-outline" style={{ ...S.sideLabel, color: 'var(--neon)' }}>COMPRA</span>
           <span style={S.canjeDesc}>MEP → CCL</span>
-          <span style={{ ...S.canjePrice, color: 'var(--neon)' }}>{fmtPercent(rates.compra.con)}</span>
+          <span className="n-outline" style={{ ...S.canjePrice, color: 'var(--neon)' }}>{fmtPercent(rates.compra.con)}</span>
           <div style={S.sinRow}><span style={S.sinLabel}>SIN COM.</span><span style={S.sinValue}>{fmtPercent(rates.compra.sin)}</span><Var value={rates.compra.var} abs /></div>
         </div>
         <div style={S.sideDivider} />
@@ -312,8 +312,8 @@ function OficialCard({ oficial, error, delay }) {
           Los datos de Bluelytics/DolarAPI llegan con la convención bancaria original. */}
       <div style={S.sidesRow}>
         <div style={S.sideCol}>
-          <span style={{ ...S.sideLabel, color: 'var(--neon)' }}>COMPRA</span>
-          <span style={{ ...S.mainPrice, color: 'var(--neon)' }}>${fmtPrice(venta)}</span>
+          <span className="t-outline" style={{ ...S.sideLabel, color: 'var(--neon)' }}>COMPRA</span>
+          <span className="n-outline" style={{ ...S.mainPrice, color: 'var(--neon)' }}>${fmtPrice(venta)}</span>
         </div>
         <div style={S.sideDivider} />
         <div style={S.sideCol}>

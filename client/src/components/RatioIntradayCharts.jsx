@@ -248,23 +248,39 @@ export default function RatioIntradayCharts({ connected }) {
       }
       return valid;
     }
-    // W / M / A: misma lógica priceFromRow pero el campo `last` no existe en
-    // `daily_fx_closes` todavía → cae a mid(bid,offer) o close.
+    // W / M / A: una foto por rueda. El server guarda el ÚLTIMO OPERADO de
+    // cada bono dos veces al día — apertura a las 10:35 y cierre a las 16:55,
+    // diez minutos adentro de cada punta de la rueda. La serie se dibuja con
+    // el cierre; la apertura va en el tooltip, junto con la variación del día.
+    //
+    // (Antes esto leía r.al30_last / r.al30_bid / r.al30_offer, tres columnas
+    // que nunca existieron en `daily_fx_closes`: siempre caía al fallback.)
     const tf = TIMEFRAMES.find(t => t.key === timeframe);
     const wantLast = tf?.tail ?? 30;
+    const ratios = (al30, al30d, al30c) => ({
+      mep:   +(al30 / al30d).toFixed(4),
+      ccl:   +(al30 / al30c).toFixed(4),
+      canje: +(((al30d / al30c) - 1) * 100).toFixed(4),
+    });
     const valid = [];
     for (const r of hist) {
-      const pAl30  = priceFromRow(r.al30_last,  r.al30_bid,  r.al30_offer,  r.al30_close);
-      const pAl30d = priceFromRow(r.al30d_last, r.al30d_bid, r.al30d_offer, r.al30d_close);
-      const pAl30c = priceFromRow(r.al30c_last, r.al30c_bid, r.al30c_offer, r.al30c_close);
-      if (!pAl30 || !pAl30d || !pAl30c) continue;
-      const canjePct = ((pAl30d / pAl30c) - 1) * 100;
+      const c = [r.al30_close, r.al30d_close, r.al30c_close].map(Number);
+      if (!c.every(v => Number.isFinite(v) && v > 0)) continue;
+      const cierre = ratios(c[0], c[1], c[2]);
+
+      // La apertura es opcional: las ruedas anteriores a que existiera la foto
+      // de las 10:35 no la tienen, y ese día simplemente no muestra variación.
+      const a = [r.al30_open, r.al30d_open, r.al30c_open].map(Number);
+      const hayApertura = a.every(v => Number.isFinite(v) && v > 0);
+      const apertura = hayApertura ? ratios(a[0], a[1], a[2]) : null;
+
       valid.push({
         x: r.date,
         xLabel: fmtDate(r.date),
-        mep:   +(pAl30  / pAl30d).toFixed(4),
-        ccl:   +(pAl30  / pAl30c).toFixed(4),
-        canje: +canjePct.toFixed(4),
+        ...cierre,
+        mepOpen:   apertura?.mep   ?? null,
+        cclOpen:   apertura?.ccl   ?? null,
+        canjeOpen: apertura?.canje ?? null,
       });
     }
     return valid.slice(-wantLast);
@@ -298,7 +314,7 @@ export default function RatioIntradayCharts({ connected }) {
   return (
     <div style={S.container}>
       <div style={S.header}>
-        <h3 style={S.title}>EVOLUCIÓN DEL TIPO DE CAMBIO</h3>
+        <h3 className="t-outline" style={S.title}>EVOLUCIÓN DEL TIPO DE CAMBIO</h3>
         <div style={S.actions}>
           <div style={S.tfRow}>
             {TIMEFRAMES.map(t => (
@@ -436,10 +452,29 @@ function RatioPanel({ title, formula, color, dataKey, decimals, isPercent, yStep
     // En DÍA, `label` es un timestamp numérico → formateamos a HH:MM AR.
     // En W/M/A, label es ya el string xLabel categórico (DD/MM).
     const labelTxt = isIntra ? fmtTimeAR(label) : label;
+
+    // En las vistas diarias cada punto tiene apertura (10:35) y cierre
+    // (16:55): mostramos las dos puntas y cuánto se movió entre ellas.
+    const fila = payload[0]?.payload;
+    const apertura = !isIntra ? fila?.[`${dataKey}Open`] : null;
+    const variacion = Number.isFinite(apertura) && apertura !== 0 && Number.isFinite(v)
+      ? ((v - apertura) / Math.abs(apertura)) * 100
+      : null;
+
     return (
       <div style={S.tip}>
         <div style={S.tipTime}>{labelTxt}</div>
         <div style={{ ...S.tipValue, color }}>{fmtVal(v)}</div>
+        {Number.isFinite(apertura) && (
+          <div style={S.tipPuntas}>
+            <span>apertura {fmtVal(apertura)}</span>
+            {variacion != null && (
+              <span style={{ color: variacion >= 0 ? '#22c55e' : '#ef4444' }}>
+                {variacion >= 0 ? '+' : ''}{variacion.toFixed(2)}%
+              </span>
+            )}
+          </div>
+        )}
       </div>
     );
   };
@@ -455,7 +490,7 @@ function RatioPanel({ title, formula, color, dataKey, decimals, isPercent, yStep
 
       <div style={S.panelHeader}>
         <div style={{ minWidth: 0 }}>
-          <span style={{ ...S.panelTitle, color }}>{title}</span>
+          <span className="t-outline" style={{ ...S.panelTitle, color }}>{title}</span>
           <span style={S.panelSub}>{formula}</span>
         </div>
         <div style={S.panelHeaderRight}>
@@ -632,6 +667,12 @@ const S = {
 
   tip:      { background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 4, padding: '6px 10px', fontFamily: "'Roboto Mono', monospace", fontSize: 10, boxShadow: '0 4px 12px rgba(0,0,0,0.3)' },
   tipTime:  { color: 'var(--text-dim)', marginBottom: 3, letterSpacing: 1 },
+  // Apertura + variación del día, debajo del valor de cierre.
+  tipPuntas: {
+    marginTop: 4, paddingTop: 4, borderTop: '1px solid var(--border)',
+    display: 'flex', gap: 8, alignItems: 'baseline',
+    fontSize: 9, color: 'var(--text-dim)', letterSpacing: 0.5,
+  },
   tipValue: { fontWeight: 700, fontSize: 12 },
 
   footer: { display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 6, padding: '10px 20px', borderTop: '1px solid var(--border)', fontFamily: "'Roboto Mono', monospace", fontSize: 9, color: 'var(--text-dim)', letterSpacing: 0.5 },
