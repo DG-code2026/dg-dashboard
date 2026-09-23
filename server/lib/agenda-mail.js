@@ -229,6 +229,7 @@ let transporter = null;
 //
 // Si hay RESEND_API_KEY se usa Resend; si no, SMTP.
 export function transporteMail() {
+  if (process.env.BREVO_API_KEY) return 'brevo';
   if (process.env.RESEND_API_KEY) return 'resend';
   if (process.env.GMAIL_USER && process.env.GMAIL_APP_PASSWORD) return 'smtp';
   return null;
@@ -246,6 +247,42 @@ function remitenteMail() {
 // Casilla a la que llegan las respuestas. Tiene que existir de verdad.
 function respuestasMail() {
   return process.env.MAIL_REPLY_TO || process.env.GMAIL_USER || 'info@delfinogavina.com.ar';
+}
+
+// ── Envío por Brevo (HTTPS) ──
+//
+// Alternativa a Resend cuando no hay acceso al DNS del dominio: Brevo permite
+// verificar una casilla suelta haciendo clic en un link que manda a esa misma
+// dirección, sin registros SPF/DKIM. El remitente tiene que ser exactamente
+// la casilla verificada.
+//
+// Sin DKIM el mail queda peor alineado, pero el dominio tiene DMARC en
+// `p=none` (sin enforcement), así que los servidores no lo rechazan.
+async function enviarPorBrevo({ para, asunto, html, adjuntoIcs }) {
+  const r = await fetch('https://api.brevo.com/v3/smtp/email', {
+    method: 'POST',
+    headers: {
+      'api-key': process.env.BREVO_API_KEY,
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+    },
+    body: JSON.stringify({
+      sender: { name: 'D&G Agenda', email: remitenteMail() },
+      to: [{ email: para }],
+      replyTo: { email: respuestasMail() },
+      subject: asunto,
+      htmlContent: html,
+      ...(adjuntoIcs ? {
+        attachment: [{
+          name: 'agenda.ics',
+          content: Buffer.from(adjuntoIcs, 'utf8').toString('base64'),
+        }],
+      } : {}),
+    }),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data?.message || `Brevo HTTP ${r.status}`);
+  return data?.messageId || null;
 }
 
 // ── Envío por Resend (HTTPS) ──
@@ -365,7 +402,9 @@ export async function enviarMail({ para, asunto, html, adjuntoIcs }) {
   for (const destinatario of para) {
     try {
       let id;
-      if (transporte === 'resend') {
+      if (transporte === 'brevo') {
+        id = await enviarPorBrevo({ para: destinatario, asunto, html, adjuntoIcs });
+      } else if (transporte === 'resend') {
         id = await enviarPorResend({ para: destinatario, asunto, html, adjuntoIcs });
       } else {
         const info = await getTransporter().sendMail({
