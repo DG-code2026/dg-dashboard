@@ -243,6 +243,11 @@ function remitenteMail() {
   return process.env.MAIL_FROM || process.env.GMAIL_USER || 'agenda@delfinogavina.com.ar';
 }
 
+// Casilla a la que llegan las respuestas. Tiene que existir de verdad.
+function respuestasMail() {
+  return process.env.MAIL_REPLY_TO || process.env.GMAIL_USER || 'info@delfinogavina.com.ar';
+}
+
 // ── Envío por Resend (HTTPS) ──
 async function enviarPorResend({ para, asunto, html, adjuntoIcs }) {
   const r = await fetch('https://api.resend.com/emails', {
@@ -254,6 +259,10 @@ async function enviarPorResend({ para, asunto, html, adjuntoIcs }) {
     body: JSON.stringify({
       from: `D&G Agenda <${remitenteMail()}>`,
       to: [para],
+      // El remitente puede ser una dirección que no existe como casilla
+      // (agenda@): para enviar alcanza con que el dominio esté verificado,
+      // pero una respuesta rebotaría. El Reply-To apunta a una casilla real.
+      reply_to: [respuestasMail()],
       subject: asunto,
       html,
       ...(adjuntoIcs ? {
@@ -361,7 +370,7 @@ export async function enviarMail({ para, asunto, html, adjuntoIcs }) {
       } else {
         const info = await getTransporter().sendMail({
           from: `"D&G Agenda" <${remitente}>`,
-          replyTo: remitente,
+          replyTo: respuestasMail(),
           to: destinatario,
           subject: asunto,
           html,
