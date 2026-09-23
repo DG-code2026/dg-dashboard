@@ -227,25 +227,37 @@ export function mailConfigurado() {
 // Prueba la conexión y el login contra Gmail sin mandar ningún mail. Sirve
 // para distinguir un problema de red (puerto bloqueado, IPv6 sin ruta) de uno
 // de credenciales, que dan errores muy distintos y se confunden fácil.
-export async function verificarSmtp() {
-  const t = getTransporter();
-  if (!t) return { ok: false, motivo: 'sin_credenciales' };
+//
+// Sin argumento usa el transporter real. Con `puerto`, arma uno descartable
+// para ese puerto: así se puede averiguar cuál deja pasar el hosting.
+export async function verificarSmtp(puerto) {
+  if (!mailConfigurado()) return { ok: false, motivo: 'sin_credenciales' };
+  const t = puerto ? transporterEnPuerto(puerto) : getTransporter();
   const t0 = Date.now();
   try {
     await t.verify();
-    return { ok: true, ms: Date.now() - t0 };
+    return { ok: true, puerto: puerto || 465, ms: Date.now() - t0 };
   } catch (e) {
-    return { ok: false, error: e.message, code: e.code || null, ms: Date.now() - t0 };
+    return { ok: false, puerto: puerto || 465, error: e.message, code: e.code || null, ms: Date.now() - t0 };
   }
 }
 
-function getTransporter() {
-  if (transporter) return transporter;
-  if (!mailConfigurado()) return null;
-  transporter = nodemailer.createTransport({
+// Prueba los puertos habituales de salida SMTP en paralelo. 465 es TLS
+// directo; 587 y 2525 usan STARTTLS (empiezan en claro y suben a TLS).
+// Varios hostings bloquean unos y dejan otros.
+export async function probarPuertosSmtp() {
+  const puertos = [465, 587, 2525];
+  return Promise.all(puertos.map(p => verificarSmtp(p)));
+}
+
+// Opciones comunes del transporter. `puerto` 465 = TLS directo; 587 y 2525
+// arrancan en claro y suben a TLS con STARTTLS (secure: false + requireTLS).
+function opcionesSmtp(puerto = Number(process.env.SMTP_PORT) || 465) {
+  return {
     host: 'smtp.gmail.com',
-    port: 465,
-    secure: true,
+    port: puerto,
+    secure: puerto === 465,
+    requireTLS: puerto !== 465,
     // IPv4 forzado. El contenedor de Render no tiene ruta IPv6: Node resolvía
     // smtp.gmail.com a una dirección v6 y la conexión moría con ENETUNREACH,
     // o quedaba colgada hasta el timeout. En local no se ve porque la máquina
@@ -260,7 +272,17 @@ function getTransporter() {
       user: process.env.GMAIL_USER,
       pass: String(process.env.GMAIL_APP_PASSWORD).replace(/\s+/g, ''), // Google las muestra con espacios
     },
-  });
+  };
+}
+
+function transporterEnPuerto(puerto) {
+  return nodemailer.createTransport(opcionesSmtp(puerto));
+}
+
+function getTransporter() {
+  if (transporter) return transporter;
+  if (!mailConfigurado()) return null;
+  transporter = nodemailer.createTransport(opcionesSmtp());
   return transporter;
 }
 

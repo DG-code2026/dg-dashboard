@@ -8,7 +8,7 @@ import Parser from 'rss-parser';
 import { httpJson, singleflight, HttpError } from './lib/http.js';
 import {
   ymdEnAR, sumarDias, lunesDeLaSemana, fmtFechaLarga,
-  construirICS, construirHtml, enviarMail, mailConfigurado, verificarSmtp,
+  construirICS, construirHtml, enviarMail, mailConfigurado, verificarSmtp, probarPuertosSmtp,
 } from './lib/agenda-mail.js';
 
 const app = express();
@@ -763,6 +763,8 @@ async function armarSemanal(hoyYmd) {
 // Diagnóstico de la conexión SMTP, sin enviar nada. Distingue un problema de
 // red de uno de credenciales.
 app.get('/api/agenda/smtp-check', async (req, res) => {
+  // ?puertos=1 prueba 465, 587 y 2525 para ver cuál deja pasar el hosting.
+  if (req.query.puertos) return res.json(await probarPuertosSmtp());
   res.json(await verificarSmtp());
 });
 
