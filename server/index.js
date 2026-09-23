@@ -763,9 +763,10 @@ async function armarSemanal(hoyYmd) {
 // Diagnóstico de la conexión SMTP, sin enviar nada. Distingue un problema de
 // red de uno de credenciales.
 app.get('/api/agenda/smtp-check', async (req, res) => {
-  // ?puertos=1 prueba 465, 587 y 2525 para ver cuál deja pasar el hosting.
-  if (req.query.puertos) return res.json(await probarPuertosSmtp());
-  res.json(await verificarSmtp());
+  // ?puerto=587 prueba uno puntual. Los tres juntos hacen timeout en el
+  // proxy de Render, así que se prueban de a uno.
+  const p = Number(req.query.puerto);
+  res.json(await verificarSmtp(Number.isFinite(p) && p > 0 ? p : undefined));
 });
 
 // Descarga .ics de un rango. Lo usan los botones "Agregar todo al calendario"
