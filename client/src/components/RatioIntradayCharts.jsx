@@ -104,29 +104,40 @@ function fmtRatio(v, decs = 2) {
   return Number(v).toLocaleString('es-AR', { minimumFractionDigits: decs, maximumFractionDigits: decs });
 }
 
-// Genera ticks del eje X para DÍA: 1 marca cada 30 min entre 10:30 y 17:00 AR
-// del día corriente. Devuelve timestamps ms en UTC.
+// ── Ventana horaria del gráfico intradiario ──
+//
+// La rueda va de 10:25 a 17:05, pero el gráfico arranca 10 minutos después de
+// la apertura y termina 10 minutos antes del cierre. En esos bordes el book
+// está desarmado y el primer y último precio no son representativos: una
+// punta suelta mueve la apertura y el mínimo/máximo del día.
+//
+// Es la misma ventana con la que el server guarda las fotos de apertura y
+// cierre de la serie diaria (10:35 y 16:55), así que el "apertura" que se lee
+// acá coincide con el que alimenta las vistas MES y ANUAL.
+const CHART_START = '10:35';
+const CHART_END   = '16:55';
+
+function arTimestamp(hhmm) {
+  return Date.parse(`${todayARKey()}T${hhmm}:00${MARKET_OFFSET}`);
+}
+
+// Marcas del eje X: 1 cada 30 min dentro de la ventana (11:00 … 16:30).
 function dayXTicks() {
-  const today = todayARKey();
+  const [ini, fin] = dayXDomain();
   const out = [];
   for (let h = 10; h <= 17; h++) {
     for (const m of [0, 30]) {
-      if (h === 10 && m === 0) continue; // arrancamos a las 10:30
-      if (h === 17 && m > 0) continue;   // terminamos a las 17:00
-      const iso = `${today}T${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:00${MARKET_OFFSET}`;
-      out.push(Date.parse(iso));
+      const t = arTimestamp(`${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`);
+      if (t >= ini && t <= fin) out.push(t);
     }
   }
   return out;
 }
 
-// Domain del eje X para DÍA: [10:25 AR, 17:05 AR] del día corriente. Así el
-// chart mantiene proporciones aunque no tengamos data para todo el día.
+// Domain del eje X para DÍA. Fijo a la ventana, así el gráfico mantiene las
+// proporciones del día aunque todavía no haya datos hasta el final.
 function dayXDomain() {
-  const today = todayARKey();
-  const start = Date.parse(`${today}T10:25:00${MARKET_OFFSET}`);
-  const end   = Date.parse(`${today}T17:05:00${MARKET_OFFSET}`);
-  return [start, end];
+  return [arTimestamp(CHART_START), arTimestamp(CHART_END)];
 }
 
 // Calcula EXACTAMENTE 5 marcas redondas en el eje Y. El step base es $10
@@ -228,6 +239,11 @@ export default function RatioIntradayCharts({ connected }) {
   // ── Series finales según temporalidad ──
   const series = useMemo(() => {
     if (timeframe === 'D') {
+      // El server samplea desde la apertura (10:25) hasta el cierre (17:05),
+      // pero el gráfico usa sólo la ventana 10:35–16:55: los bordes de la
+      // rueda distorsionan apertura, mínimo y máximo. Las muestras de afuera
+      // se guardan igual, simplemente no se dibujan.
+      const [ventanaIni, ventanaFin] = dayXDomain();
       const valid = [];
       for (const r of intra) {
         // Prioridad: last (REST/Primary) → mid(bid,offer) → null
@@ -237,6 +253,7 @@ export default function RatioIntradayCharts({ connected }) {
         if (!pAl30 || !pAl30d || !pAl30c) continue;
         const t = Date.parse(r.t); // TIMESTAMPTZ → ms
         if (!Number.isFinite(t)) continue;
+        if (t < ventanaIni || t > ventanaFin) continue;
         const canjePct = ((pAl30d / pAl30c) - 1) * 100;
         valid.push({
           t,
