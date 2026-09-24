@@ -55,6 +55,82 @@ const HOLIDAYS = {
   '2027-12-08': 'Inmaculada Concepción', '2027-12-25': 'Navidad',
 };
 
+// ── Feriados del mercado americano (NYSE / Nasdaq) ──
+//
+// A diferencia de los argentinos, que se fijan por decreto año a año y hay
+// que cargarlos a mano, los del NYSE salen de reglas estables. Se calculan,
+// no se tabulan: así la card funciona para cualquier año sin mantenimiento.
+//
+// Reglas de traslado del NYSE para los de fecha fija:
+//   - Cae sábado  → se observa el viernes anterior.
+//   - Cae domingo → se observa el lunes siguiente.
+//   - Excepción: si Año Nuevo cae sábado, el mercado NO cierra el 31/12.
+
+// Domingo de Pascua (algoritmo de Meeus/Jones/Butcher, calendario gregoriano).
+function pascua(year) {
+  const a = year % 19;
+  const b = Math.floor(year / 100), c = year % 100;
+  const d = Math.floor(b / 4), e = b % 4;
+  const f = Math.floor((b + 8) / 25);
+  const g = Math.floor((b - f + 1) / 3);
+  const h = (19 * a + b - d - g + 15) % 30;
+  const i = Math.floor(c / 4), k = c % 4;
+  const l = (32 + 2 * e + 2 * i - h - k) % 7;
+  const m = Math.floor((a + 11 * h + 22 * l) / 451);
+  const mes = Math.floor((h + l - 7 * m + 114) / 31);
+  const dia = ((h + l - 7 * m + 114) % 31) + 1;
+  return new Date(year, mes - 1, dia);
+}
+
+// n-ésimo `weekday` (0=Dom) del mes. Con n < 0, el último.
+function nthWeekday(year, month0, weekday, n) {
+  if (n < 0) {
+    const ultimo = new Date(year, month0 + 1, 0);
+    const delta = (ultimo.getDay() - weekday + 7) % 7;
+    return new Date(year, month0, ultimo.getDate() - delta);
+  }
+  const primero = new Date(year, month0, 1);
+  const delta = (weekday - primero.getDay() + 7) % 7;
+  return new Date(year, month0, 1 + delta + (n - 1) * 7);
+}
+
+// Aplica el traslado de fin de semana.
+function observado(fecha, esAnioNuevo = false) {
+  const dow = fecha.getDay();
+  if (dow === 6) {
+    // Año Nuevo en sábado: el NYSE no cierra el 31 de diciembre anterior.
+    if (esAnioNuevo) return null;
+    return new Date(fecha.getFullYear(), fecha.getMonth(), fecha.getDate() - 1);
+  }
+  if (dow === 0) return new Date(fecha.getFullYear(), fecha.getMonth(), fecha.getDate() + 1);
+  return fecha;
+}
+
+// Mapa { 'YYYY-MM-DD': 'Nombre' } con los feriados del NYSE de ese año.
+function feriadosUSA(year) {
+  const out = {};
+  const poner = (fecha, nombre) => {
+    if (!fecha) return;
+    out[ymd(fecha)] = nombre;
+  };
+
+  poner(observado(new Date(year, 0, 1), true), 'Año Nuevo');
+  poner(nthWeekday(year, 0, 1, 3),  'Martin Luther King Jr.');
+  poner(nthWeekday(year, 1, 1, 3),  'Día de los Presidentes');
+
+  const p = pascua(year);
+  poner(new Date(p.getFullYear(), p.getMonth(), p.getDate() - 2), 'Viernes Santo');
+
+  poner(nthWeekday(year, 4, 1, -1), 'Memorial Day');
+  poner(observado(new Date(year, 5, 19)), 'Juneteenth');
+  poner(observado(new Date(year, 6, 4)),  'Día de la Independencia');
+  poner(nthWeekday(year, 8, 1, 1),  'Labor Day');
+  poner(nthWeekday(year, 10, 4, 4), 'Thanksgiving');
+  poner(observado(new Date(year, 11, 25)), 'Navidad');
+
+  return out;
+}
+
 // ── Helpers ──
 function fmtN(v, dec = 2) {
   if (v == null || isNaN(v)) return '—';
@@ -813,6 +889,9 @@ function LinkRow({ link }) {
 function DiasHabilesCard() {
   const [hover, setHover] = useState(false);
   const [monthOffset, setMonthOffset] = useState(0);
+  // 'ARG' = feriados nacionales argentinos (tabla HOLIDAYS, cargada a mano).
+  // 'USA' = feriados del NYSE, calculados por regla para cualquier año.
+  const [mercado, setMercado] = useState('ARG');
 
   // Año máximo cubierto por la tabla HOLIDAYS — lo calculamos una vez al
   // montar para mostrar un aviso cuando el usuario navega más allá.
@@ -832,6 +911,9 @@ function DiasHabilesCard() {
     const year = viewMonth.getFullYear();
     const month = viewMonth.getMonth();
     const lastDay = new Date(year, month + 1, 0).getDate();
+    // Los de EE.UU. se calculan para el año que se está mirando; los
+    // argentinos salen de la tabla fija.
+    const tablaFeriados = mercado === 'USA' ? feriadosUSA(year) : HOLIDAYS;
 
     let total = 0;
     let remaining = 0;
@@ -844,7 +926,7 @@ function DiasHabilesCard() {
       const key = ymd(dt);
       const wi = mondayIndex(dt);
       const isWeekend = wi >= 5;
-      const holidayName = HOLIDAYS[key] || null;
+      const holidayName = tablaFeriados[key] || null;
 
       if (isWeekend) weekendCount++;
       if (holidayName) {
@@ -866,7 +948,8 @@ function DiasHabilesCard() {
 
     const isCurrentMonth = monthOffset === 0;
     const isPast = monthOffset < 0;
-    const outOfRange = year > HOLIDAYS_LAST_YEAR;
+    // Los del NYSE se calculan, así que nunca quedan fuera de rango.
+    const outOfRange = mercado === 'ARG' && year > HOLIDAYS_LAST_YEAR;
 
     return {
       year, month, total, remaining,
@@ -875,7 +958,7 @@ function DiasHabilesCard() {
       monthTitle: monthLabelFull(viewMonth),
       isCurrentMonth, isPast, outOfRange,
     };
-  }, [monthOffset, HOLIDAYS_LAST_YEAR]);
+  }, [monthOffset, mercado, HOLIDAYS_LAST_YEAR]);
 
   // El número grande: mes actual = restantes; otros = total del mes.
   const bigNumber = info.isCurrentMonth ? info.remaining : info.total;
@@ -897,6 +980,16 @@ function DiasHabilesCard() {
           <div style={S.cardSub}>{info.monthTitle}</div>
         </div>
         <div style={S.cardTools}>
+          <div style={S.dhSwitch}>
+            {['ARG', 'USA'].map(m => (
+              <button
+                key={m}
+                style={{ ...S.dhSwitchBtn, ...(mercado === m ? S.dhSwitchBtnOn : {}) }}
+                onClick={() => setMercado(m)}
+                title={m === 'ARG' ? 'Feriados nacionales argentinos' : 'Feriados del mercado americano (NYSE)'}
+              >{m}</button>
+            ))}
+          </div>
           <button style={S.navBtn} onClick={() => setMonthOffset(o => o - 1)} title="Mes anterior">‹</button>
           <button
             style={{ ...S.navBtn, ...(monthOffset === 0 ? S.navBtnActive : {}) }}
@@ -933,7 +1026,9 @@ function DiasHabilesCard() {
       <div style={S.dhFeriadosBox}>
         <div style={S.dhFeriadosTitle}>FERIADOS DEL MES</div>
         {info.feriados.length === 0 ? (
-          <div style={S.dhFeriadosEmpty}>Sin feriados nacionales este mes.</div>
+          <div style={S.dhFeriadosEmpty}>
+            {mercado === 'USA' ? 'Sin feriados de mercado este mes.' : 'Sin feriados nacionales este mes.'}
+          </div>
         ) : (
           <div style={S.dhFeriadosList}>
             {info.feriados.map(f => (
@@ -960,7 +1055,7 @@ function DiasHabilesCard() {
       </div>
 
       <div style={S.summaryRow}>
-        <span>Lun a Vie · excl. feriados nacionales AR</span>
+        <span>Lun a Vie · excl. {mercado === 'USA' ? 'feriados de NYSE' : 'feriados nacionales AR'}</span>
         <span>HOY {new Date().toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit' })}</span>
       </div>
     </div>
@@ -1615,6 +1710,20 @@ const S = {
     minWidth: 24, lineHeight: 1.4,
   },
   navBtnActive: { color: 'var(--neon)', borderColor: 'var(--neon)', background: 'rgba(0,255,170,0.06)' },
+
+  // Selector de mercado (ARG / USA) en la card de días hábiles. Va pegado,
+  // con un borde común, para que se lea como un toggle de dos posiciones y
+  // no como dos botones sueltos al lado de las flechas de mes.
+  dhSwitch: {
+    display: 'flex', border: '1px solid var(--border)', borderRadius: 4,
+    overflow: 'hidden', marginRight: 6,
+  },
+  dhSwitchBtn: {
+    background: 'transparent', border: 'none', cursor: 'pointer',
+    fontFamily: "'Roboto Mono',monospace", fontSize: 9, fontWeight: 700,
+    letterSpacing: 1, padding: '4px 8px', color: 'var(--text-dim)',
+  },
+  dhSwitchBtnOn: { background: 'var(--bg-card-hover)', color: 'var(--neon)' },
 
   // Leyenda de tipos de cobro, arriba del calendario.
   legend: {
