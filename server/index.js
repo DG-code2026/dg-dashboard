@@ -2382,7 +2382,12 @@ function marketStatusPayload(now = new Date()) {
 // día inhábil: un viernes, la de "1 día" se opera a 3 y vence el lunes. La UI
 // muestra los dos para que no haya confusión sobre qué se está mirando.
 app.get('/api/cauciones', (req, res) => {
-  const hoy = new Date();
+  // El vencimiento se calcula sobre el día calendario ARGENTINO, sumando días
+  // con aritmética de fecha pura. Construirlo con `new Date(y, m, d + n)` usa
+  // el huso del proceso: en Render, que corre en UTC, la medianoche local del
+  // día siguiente cae a las 21:00 AR del día anterior y el vencimiento se
+  // mostraba un día antes de lo real.
+  const hoyAR = todayKeyAR();
   const monedas = CAUCION_MONEDAS.map(({ moneda, label }) => ({
     moneda,
     label,
@@ -2391,12 +2396,11 @@ app.get('/api/cauciones', (req, res) => {
       const k = caucionKey(moneda, objetivo);
       const md = latestData[k]?.marketData || null;
       const tasa = extractPrice(k, 'LA');
-      // Vencimiento = hoy + los días corridos que realmente se operan.
-      const vence = r ? new Date(hoy.getFullYear(), hoy.getMonth(), hoy.getDate() + r.dias) : null;
+      // Vencimiento = hoy (AR) + los días corridos que realmente se operan.
       return {
         plazo: objetivo,
         plazoReal: r?.dias ?? null,
-        vence: vence ? todayKeyAR(vence) : null,
+        vence: r ? sumarDias(hoyAR, r.dias) : null,
         tasa: Number.isFinite(tasa) ? tasa : null,
         volumen: md?.TV?.size ?? md?.TV ?? null,
         updatedAt: latestData[k]?.timestamp || null,
