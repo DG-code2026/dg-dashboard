@@ -1929,8 +1929,62 @@ let fxSettlement = {};
 // En Primary son instrumentos propios: "MERV - XMEV - PESOS - <N>D". Se
 // suscriben por WS igual que los bonos; el precio que publican ES la tasa
 // (TNA %), no un precio en pesos.
+// Plazos de referencia que mostramos. Son OBJETIVOS, no necesariamente el
+// plazo que se opera: ver la resolución más abajo.
 const CAUCION_PLAZOS = [1, 7, 14, 30];
-const caucionKey = (d) => `CAUCION${d}`;
+
+// Dos monedas. Primary las expone como familias distintas de instrumentos.
+// (Existe también CABLE, que no pedimos.)
+const CAUCION_MONEDAS = [
+  { moneda: 'ARS', familia: 'PESOS', label: 'Pesos'   },
+  { moneda: 'USD', familia: 'DOLAR', label: 'Dólares' },
+];
+
+const caucionKey = (moneda, d) => `CAUCION_${moneda}_${d}`;
+
+// Resolución del plazo real.
+//
+// Primary sólo publica los plazos cuyo VENCIMIENTO cae en día hábil: un jueves
+// la lista arranca 1, 4, 5, 6... porque 2 y 3 vencerían sábado y domingo. Es
+// el mercado el que ya resuelve el problema del día inhábil.
+//
+// Por eso no pedimos "1D" a ciegas: buscamos el menor plazo disponible que
+// cubra el objetivo. Un viernes, la caución a "1 día" se opera a 3 días
+// (vence el lunes), y eso es lo que hay que mostrar.
+function resolverPlazoCaucion(familia, objetivo) {
+  const prefijo = `MERV - XMEV - ${familia} - `;
+  let mejor = null;
+  for (const i of allInstruments) {
+    const sym = i.instrumentId?.symbol || '';
+    if (!sym.startsWith(prefijo)) continue;
+    const m = sym.slice(prefijo.length).match(/^(\d+)D$/);
+    if (!m) continue;
+    const dias = Number(m[1]);
+    if (dias < objetivo) continue;
+    if (!mejor || dias < mejor.dias) mejor = { dias, inst: i.instrumentId, symbol: sym };
+  }
+  return mejor;
+}
+
+// { 'ARS': { 1: {dias, symbol}, ... }, 'USD': {...} }. Se rearma en cada
+// discover() porque el catálogo de plazos válidos cambia todos los días.
+let caucionesResueltas = {};
+
+// Relee el catálogo una vez por día hábil, a las 9:30 AR (antes de que abra
+// el mercado a las 10:25). Sin esto, un server que queda prendido varios días
+// seguiría resolviendo los plazos de caución con la foto del día que arrancó.
+let ultimoDiscoverDate = null;
+function maybeRediscover() {
+  const { weekday, hour, minute } = getBuenosAiresParts();
+  if (!['Mon','Tue','Wed','Thu','Fri'].includes(weekday)) return;
+  const m = hour * 60 + minute;
+  const hoy = todayKeyAR();
+  if (ultimoDiscoverDate === hoy) return;
+  if (m < 9 * 60 + 30 || m >= 9 * 60 + 40) return;
+  ultimoDiscoverDate = hoy;
+  console.log('🔄 Relectura diaria del catálogo de instrumentos');
+  discover().catch(e => console.error('rediscover:', e.message));
+}
 
 // Settlement aliases: app-facing → Primary symbol suffix
 const SETTLEMENT_MAP = { 'A-24HS': '24hs', 'A-48HS': '48hs', 'INMEDIATA': 'CI', 'CI': 'CI', '24HS': '24hs', '48HS': '48hs' };
@@ -1991,16 +2045,24 @@ async function discover() {
     }
     const plazos = TK.map(k => `${k}:${fxSettlement[k] || '?'}`).join(' ');
 
-    // Cauciones en pesos a los plazos de referencia.
+    // Cauciones en pesos y en dólares, resolviendo cada plazo objetivo al
+    // menor disponible que lo cubra.
     let cauc = 0;
-    for (const d of CAUCION_PLAZOS) {
-      const sym = `MERV - XMEV - PESOS - ${d}D`;
-      const m = allInstruments.find(i => i.instrumentId?.symbol === sym);
-      if (!m) { console.warn(`⚠️  caución ${d}D: no está en el catálogo de Primary`); continue; }
-      resolved.push(m.instrumentId);
-      symMap[sym] = caucionKey(d);
-      cauc++;
+    caucionesResueltas = {};
+    const detalle = [];
+    for (const { moneda, familia } of CAUCION_MONEDAS) {
+      caucionesResueltas[moneda] = {};
+      for (const objetivo of CAUCION_PLAZOS) {
+        const r = resolverPlazoCaucion(familia, objetivo);
+        if (!r) { console.warn(`⚠️  caución ${familia} ${objetivo}D: sin plazo disponible que la cubra`); continue; }
+        caucionesResueltas[moneda][objetivo] = { dias: r.dias, symbol: r.symbol };
+        resolved.push(r.inst);
+        symMap[r.symbol] = caucionKey(moneda, objetivo);
+        if (r.dias !== objetivo) detalle.push(`${moneda} ${objetivo}→${r.dias}`);
+        cauc++;
+      }
     }
+    if (detalle.length) console.log(`   cauciones con plazo corrido: ${detalle.join(' ')}`);
 
     console.log(`📋 Instruments: ${allInstruments.length} total, ${resolved.length - cauc} AL30-series (${plazos}), ${cauc} cauciones`);
   } catch (e) { console.error('discover error:', e.message); }
@@ -2313,20 +2375,36 @@ function marketStatusPayload(now = new Date()) {
 // ── Cauciones en pesos ──
 // Devuelve la tasa de la última operación (TNA %) por plazo. Primary publica
 // la tasa en el campo de precio, así que LA es directamente la tasa operada.
+// Devuelve, por moneda, la tasa de la última operación de cada plazo.
+//
+// `plazo` es el objetivo que pidió el usuario (1, 7, 14, 30) y `plazoReal` el
+// que efectivamente se opera. Cuando difieren es porque el vencimiento caía en
+// día inhábil: un viernes, la de "1 día" se opera a 3 y vence el lunes. La UI
+// muestra los dos para que no haya confusión sobre qué se está mirando.
 app.get('/api/cauciones', (req, res) => {
-  const items = CAUCION_PLAZOS.map(d => {
-    const k = caucionKey(d);
-    const md = latestData[k]?.marketData || null;
-    const tasa = extractPrice(k, 'LA');
-    return {
-      plazo: d,
-      tasa: Number.isFinite(tasa) ? tasa : null,
-      volumen: md?.TV?.size ?? md?.TV ?? null,
-      updatedAt: latestData[k]?.timestamp || null,
-      suscripto: !!latestData[k],
-    };
-  });
-  res.json({ items, marketOpen: isMarketOpen() });
+  const hoy = new Date();
+  const monedas = CAUCION_MONEDAS.map(({ moneda, label }) => ({
+    moneda,
+    label,
+    items: CAUCION_PLAZOS.map(objetivo => {
+      const r = caucionesResueltas[moneda]?.[objetivo] || null;
+      const k = caucionKey(moneda, objetivo);
+      const md = latestData[k]?.marketData || null;
+      const tasa = extractPrice(k, 'LA');
+      // Vencimiento = hoy + los días corridos que realmente se operan.
+      const vence = r ? new Date(hoy.getFullYear(), hoy.getMonth(), hoy.getDate() + r.dias) : null;
+      return {
+        plazo: objetivo,
+        plazoReal: r?.dias ?? null,
+        vence: vence ? todayKeyAR(vence) : null,
+        tasa: Number.isFinite(tasa) ? tasa : null,
+        volumen: md?.TV?.size ?? md?.TV ?? null,
+        updatedAt: latestData[k]?.timestamp || null,
+        suscripto: !!latestData[k],
+      };
+    }),
+  }));
+  res.json({ monedas, marketOpen: isMarketOpen() });
 });
 
 // ── Persistencia (Supabase / settings) ──
@@ -2388,6 +2466,11 @@ setInterval(() => {
   const open = isMarketOpen();
   // Fotos de apertura (10:35) y cierre (16:55) para el gráfico de evolución.
   maybeSnapFx();
+  // Relectura diaria del catálogo de instrumentos, antes de la apertura.
+  // Los plazos de caución disponibles cambian todos los días (Primary sólo
+  // publica los que vencen en día hábil), así que si el server queda días
+  // prendido la resolución de plazos se desactualiza.
+  maybeRediscover();
   if (open) {
     saveMarketSnapshot('periodic');
   } else if (lastMarketOpen) {

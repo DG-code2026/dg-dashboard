@@ -329,7 +329,7 @@ function FxRoute() {
         <DollarRates data={data} commission={commission / 100} market={market} />
       </section>
       <section style={{ marginTop: 32 }}>
-        <SH title="CAUCIONES EN PESOS" />
+        <SH title="CAUCIONES" />
         <CaucionesPanel />
       </section>
       <section style={{ marginTop: 32 }}>
